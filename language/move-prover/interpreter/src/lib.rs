@@ -29,6 +29,7 @@ use move_model::{
 };
 
 pub mod concrete;
+pub mod symbolic;
 pub mod shared;
 
 use crate::concrete::{
