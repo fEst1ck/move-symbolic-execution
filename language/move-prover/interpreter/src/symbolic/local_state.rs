@@ -43,4 +43,12 @@ impl<'ctx> LocalState<'ctx> {
     pub fn set_var(&mut self, x: TempIndex, v: TypedValue<'ctx>) {
         self.slots[x].load(v)
     }
+
+    pub fn or(states: Vec<&LocalState<'ctx>>) -> Self {
+        todo!()
+    }
+}
+
+pub fn merge_state<'ctx>(s1: LocalState<'ctx>, s2: LocalState<'ctx>) -> LocalState<'ctx> {
+    todo!()
 }
