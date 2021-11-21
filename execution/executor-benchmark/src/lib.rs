@@ -21,14 +21,12 @@ use std::{
     path::Path,
     sync::{mpsc, Arc},
 };
-use storage_client::StorageClient;
 use storage_interface::{default_protocol::DbReaderWriter, DbReader};
-use storage_service::start_storage_service_with_db;
 
-pub fn create_storage_service_and_executor(
+pub fn init_db_and_executor(
     config: &NodeConfig,
 ) -> (Arc<dyn DbReader<DpnProto>>, Executor<DpnProto, DiemVM>) {
-    let db = Arc::new(
+    let (db, dbrw) = DbReaderWriter::wrap(
         DiemDB::open(
             &config.storage.dir(),
             false, /* readonly */
@@ -39,11 +37,7 @@ pub fn create_storage_service_and_executor(
         .expect("DB should open."),
     );
 
-    let _handle = start_storage_service_with_db(config, db.clone());
-    let executor = Executor::new(DbReaderWriter::new(StorageClient::new(
-        &config.storage.address,
-        config.storage.timeout_ms,
-    )));
+    let executor = Executor::new(dbrw);
 
     (db, executor)
 }
@@ -54,6 +48,7 @@ pub fn run_benchmark(
     num_transfer_blocks: usize,
     source_dir: impl AsRef<Path>,
     checkpoint_dir: impl AsRef<Path>,
+    verify: bool,
 ) {
     // Create rocksdb checkpoint.
     if checkpoint_dir.as_ref().exists() {
@@ -61,23 +56,21 @@ pub fn run_benchmark(
     }
     std::fs::create_dir_all(checkpoint_dir.as_ref()).unwrap();
 
-    {
-        DiemDB::open(
-            &source_dir,
-            false, /* readonly */
-            None,  /* pruner */
-            RocksdbConfig::default(),
-            true, /* account_count_migration */
-        )
-        .expect("db open failure.")
-        .create_checkpoint(checkpoint_dir.as_ref().join("diemdb"))
-        .expect("db checkpoint creation fails.");
-    }
+    DiemDB::open(
+        &source_dir,
+        true, /* readonly */
+        None, /* pruner */
+        RocksdbConfig::default(),
+        true, /* account_count_migration */
+    )
+    .expect("db open failure.")
+    .create_checkpoint(checkpoint_dir.as_ref().join("diemdb"))
+    .expect("db checkpoint creation fails.");
 
     let (mut config, genesis_key) = diem_genesis_tool::test_config();
     config.storage.dir = checkpoint_dir.as_ref().to_path_buf();
 
-    let (db, executor) = create_storage_service_and_executor(&config);
+    let (db, executor) = init_db_and_executor(&config);
     let parent_block_id = executor.committed_block_id();
     let executor_1 = Arc::new(executor);
     let executor_2 = executor_1.clone();
@@ -129,7 +122,9 @@ pub fn run_benchmark(
     commit_thread.join().unwrap();
 
     // Do a sanity check on the sequence number to make sure all transactions are committed.
-    generator.verify_sequence_number(db.as_ref());
+    if verify {
+        generator.verify_sequence_number(db.as_ref());
+    }
 }
 
 #[cfg(test)]
@@ -156,6 +151,7 @@ mod tests {
             5, /* num_transfer_blocks */
             storage_dir.as_ref(),
             checkpoint_dir,
+            false,
         );
     }
 }

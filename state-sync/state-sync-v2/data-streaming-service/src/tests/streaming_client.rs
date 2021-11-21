@@ -9,9 +9,10 @@ use crate::{
         new_streaming_service_client_listener_pair, ContinuouslyStreamTransactionOutputsRequest,
         ContinuouslyStreamTransactionsRequest, DataStreamingClient, GetAllAccountsRequest,
         GetAllEpochEndingLedgerInfosRequest, GetAllTransactionOutputsRequest,
-        GetAllTransactionsRequest, PayloadRefetchReason, RefetchNotificationPayloadRequest,
-        StreamRequest, StreamingServiceListener,
+        GetAllTransactionsRequest, NotificationFeedback, StreamRequest, StreamingServiceListener,
+        TerminateStreamRequest,
     },
+    tests::utils::initialize_logger,
 };
 use channel::{diem_channel, message_queues::QueueStyle};
 use claim::assert_ok;
@@ -44,13 +45,14 @@ fn test_get_all_accounts() {
     let request_version = 100;
     let expected_request = StreamRequest::GetAllAccounts(GetAllAccountsRequest {
         version: request_version,
+        start_index: 0,
     });
 
     // Spawn a new server thread to handle any account stream requests
     let _handler = spawn_service_and_expect_request(streaming_service_listener, expected_request);
 
     // Send an account stream request and verify we get a data stream listener
-    let response = block_on(streaming_service_client.get_all_accounts(request_version));
+    let response = block_on(streaming_service_client.get_all_accounts(request_version, None));
     assert_ok!(response);
 }
 
@@ -193,29 +195,28 @@ fn test_continuously_stream_transaction_outputs() {
 }
 
 #[test]
-fn test_refetch_notification_payloads() {
+fn test_terminate_stream() {
     // Create a new streaming service client and listener
     let (streaming_service_client, streaming_service_listener) =
         new_streaming_service_client_listener_pair();
 
     // Note the request we expect to receive on the streaming service side
     let request_notification_id = 19478;
-    let request_refetch_reason = PayloadRefetchReason::InvalidPayloadData;
-    let expected_request =
-        StreamRequest::RefetchNotificationPayload(RefetchNotificationPayloadRequest {
-            notification_id: request_notification_id,
-            refetch_reason: request_refetch_reason.clone(),
-        });
+    let notification_feedback = NotificationFeedback::InvalidPayloadData;
+    let expected_request = StreamRequest::TerminateStream(TerminateStreamRequest {
+        notification_id: request_notification_id,
+        notification_feedback: notification_feedback.clone(),
+    });
 
-    // Spawn a new server thread to handle any refetch payload requests
+    // Spawn a new server thread to handle any feedback requests
     let _handler = spawn_service_and_expect_request(streaming_service_listener, expected_request);
 
-    // Send a refetch payload request and verify we get a data stream listener
-    let response = block_on(
+    // Provide payload feedback and verify no error is returned
+    let result = block_on(
         streaming_service_client
-            .refetch_notification_payload(request_notification_id, request_refetch_reason),
+            .terminate_stream_with_feedback(request_notification_id, notification_feedback),
     );
-    assert_ok!(response);
+    assert_ok!(result);
 }
 
 /// Spawns a new thread that listens to the given streaming service listener and
@@ -225,6 +226,8 @@ fn spawn_service_and_expect_request(
     mut streaming_service_listener: StreamingServiceListener,
     expected_request: StreamRequest,
 ) -> JoinHandle<()> {
+    initialize_logger();
+
     std::thread::spawn(move || loop {
         if let Some(stream_request_message) =
             streaming_service_listener.select_next_some().now_or_never()
@@ -255,6 +258,8 @@ fn spawn_service_and_respond_with_error(
     mut streaming_service_listener: StreamingServiceListener,
     response_error: Error,
 ) -> JoinHandle<()> {
+    initialize_logger();
+
     std::thread::spawn(move || loop {
         if let Some(stream_request_message) =
             streaming_service_listener.select_next_some().now_or_never()

@@ -1,7 +1,7 @@
 // Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::transport::ConnectionMetadata;
+use crate::{protocols::wire::handshake::v1::ProtocolId, transport::ConnectionMetadata};
 
 /// Errors related to the peer layer in the `NetworkInterface`
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -22,6 +22,16 @@ impl PeerInfo {
             status: PeerState::Connected,
             active_connection: connection_metadata,
         }
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.status == PeerState::Connected
+    }
+
+    pub fn supports_protocol(&self, protocol: ProtocolId) -> bool {
+        self.active_connection
+            .application_protocols
+            .contains(protocol)
     }
 }
 

@@ -6,8 +6,8 @@ use move_binary_format::{
     access::ModuleAccess,
     compatibility::Compatibility,
     errors::VMError,
-    file_format::{AbilitySet, CompiledModule, SignatureToken},
-    normalized,
+    file_format::{AbilitySet, CompiledModule, FunctionDefinitionIndex, SignatureToken},
+    normalized, IndexKind,
 };
 use move_bytecode_utils::Modules;
 use move_command_line_common::files::MOVE_COMPILED_EXTENSION;
@@ -20,19 +20,26 @@ use move_core_types::{
     transaction_argument::TransactionArgument,
     vm_status::{AbortLocation, StatusCode, VMStatus},
 };
+use move_ir_types::location::Loc;
 use resource_viewer::{AnnotatedMoveStruct, MoveValueAnnotator};
 
 use move_vm_types::gas_schedule::GasStatus;
 
+use bytecode_source_map::source_map::SourceMap;
+use move_lang::diagnostics::{self, report_diagnostics, Diagnostic, Diagnostics, FilesSourceText};
+
 use anyhow::{bail, Result};
 use std::{collections::BTreeMap, fs, path::Path};
+
+use colored::Colorize;
+use difference::{Changeset, Difference};
 
 pub mod mode;
 pub mod on_disk_state_view;
 pub mod package;
 
 pub use mode::*;
-use move_binary_format::layout::GetModule;
+use move_bytecode_utils::module_cache::GetModule;
 pub use on_disk_state_view::*;
 pub use package::*;
 
@@ -94,6 +101,42 @@ fn print_struct_with_indent(value: &AnnotatedMoveStruct, indent: u64) {
     }
 }
 
+// Print struct diff with a specified outer indent
+fn print_struct_diff_with_indent(
+    value1: &AnnotatedMoveStruct,
+    value2: &AnnotatedMoveStruct,
+    indent: u64,
+) {
+    let indent_str: String = (0..indent).map(|_| " ").collect::<String>();
+    let prev_str = format!("{}", value1);
+    let new_str = format!("{}", value2);
+
+    let Changeset { diffs, .. } = Changeset::new(&prev_str, &new_str, "\n");
+
+    for diff in diffs {
+        match diff {
+            Difference::Same(ref x) => {
+                let lines = x.split('\n');
+                for line in lines {
+                    println!(" {}{}", indent_str, line);
+                }
+            }
+            Difference::Add(ref x) => {
+                let lines = x.split('\n');
+                for line in lines {
+                    println!("{}{}{}", "+".green(), indent_str, line.green());
+                }
+            }
+            Difference::Rem(ref x) => {
+                let lines = x.split('\n');
+                for line in lines {
+                    println!("{}{}{}", "-".red(), indent_str, line.red());
+                }
+            }
+        }
+    }
+}
+
 pub(crate) fn explain_execution_effects(
     changeset: &ChangeSet,
     events: &[Event],
@@ -149,12 +192,10 @@ pub(crate) fn explain_execution_effects(
                             .unwrap();
                         let resource_old = MoveValueAnnotator::new(state)
                             .view_resource(struct_tag, &resource_data)?;
-                        println!("      Previous:");
-                        print_struct_with_indent(&resource_old, 8);
                         let resource_new =
                             MoveValueAnnotator::new(state).view_resource(struct_tag, blob)?;
-                        println!("      New:");
-                        print_struct_with_indent(&resource_new, 8)
+
+                        print_struct_diff_with_indent(&resource_old, &resource_new, 8)
                     } else {
                         println!(
                             "Added type {}: {:?} (wrote {:?} bytes)",
@@ -266,10 +307,13 @@ pub(crate) fn explain_publish_error(
     error: VMError,
     state: &OnDiskStateView,
     module: &CompiledModule,
+    src_map: &SourceMap,
+    files: &FilesSourceText,
 ) -> Result<()> {
     use StatusCode::*;
 
     let module_id = module.self_id();
+    let error_clone = error.clone();
     match error.into_vm_status() {
         VMStatus::Error(DUPLICATE_MODULE_NAME) => {
             println!(
@@ -344,6 +388,33 @@ pub(crate) fn explain_publish_error(
             }
             println!("Re-run with --ignore-breaking-changes to publish anyway.")
         }
+        VMStatus::Error(MISSING_DEPENDENCY) => {
+            let err_indices = error_clone.indices();
+            let mut diags = Diagnostics::new();
+            for (ind_kind, table_ind) in err_indices {
+                if let IndexKind::FunctionHandle = ind_kind {
+                    let native_function = &(module.function_defs())[*table_ind as usize];
+                    let fh = module.function_handle_at(native_function.function);
+                    let mh = module.module_handle_at(fh.module);
+                    let function_source_map =
+                        src_map.get_function_source_map(FunctionDefinitionIndex(*table_ind));
+                    if let Ok(map) = function_source_map {
+                        let err_string = format!(
+                            "Missing implementation for the native function {}::{}",
+                            module.identifier_at(mh.name).as_str(),
+                            module.identifier_at(fh.name).as_str()
+                        );
+                        let diag = Diagnostic::new(
+                            diagnostics::codes::Declarations::InvalidFunction,
+                            (map.definition_location, err_string),
+                            Vec::<(Loc, String)>::new(),
+                        );
+                        diags.add(diag);
+                    }
+                }
+            }
+            report_diagnostics(files, diags)
+        }
         VMStatus::Error(status_code) => {
             println!("Publishing failed with unexpected error {:?}", status_code)
         }
@@ -413,6 +484,10 @@ pub(crate) fn explain_execution_error(
                     .to_string(),
                 ARITHMETIC_ERROR => "an arithmetic error (i.e., integer overflow/underflow, \
                                      div/mod by zero, or invalid shift)"
+                    .to_string(),
+                VECTOR_OPERATION_ERROR => "an error originated from vector operations (i.e., \
+                                           index out of bound, pop an empty vector, or unpack a \
+                                           vector with a wrong parity)"
                     .to_string(),
                 EXECUTION_STACK_OVERFLOW => "an execution stack overflow".to_string(),
                 CALL_STACK_OVERFLOW => "a call stack overflow".to_string(),

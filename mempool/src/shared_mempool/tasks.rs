@@ -6,7 +6,7 @@ use crate::{
     core_mempool::{CoreMempool, TimelineState, TxnPointer},
     counters,
     logging::{LogEntry, LogEvent, LogSchema},
-    network::MempoolSyncMsg,
+    network::{BroadcastError, MempoolSyncMsg},
     shared_mempool::types::{
         notify_subscribers, ScheduledBroadcast, SharedMempool, SharedMempoolNotification,
         SubmissionStatusBundle, TransactionSummary,
@@ -43,7 +43,7 @@ use vm_validator::vm_validator::{get_account_sequence_number, TransactionValidat
 // ============================== //
 
 /// Attempts broadcast to `peer` and schedules the next broadcast.
-pub(crate) fn execute_broadcast<V>(
+pub(crate) async fn execute_broadcast<V>(
     peer: PeerNetworkId,
     backoff: bool,
     smp: &mut SharedMempool<V>,
@@ -55,7 +55,22 @@ pub(crate) fn execute_broadcast<V>(
     let network_interface = &smp.network_interface.clone();
     // If there's no connection, don't bother to broadcast
     if network_interface.app_data().read(&peer).is_some() {
-        network_interface.execute_broadcast(peer, backoff, smp);
+        if let Err(err) = network_interface
+            .execute_broadcast(peer, backoff, smp)
+            .await
+        {
+            match err {
+                BroadcastError::NetworkError(peer, error) => error!(LogSchema::event_log(
+                    LogEntry::BroadcastTransaction,
+                    LogEvent::NetworkSendFail
+                )
+                .peer(&peer)
+                .error(&error)),
+                _ => {
+                    trace!("{:?}", err)
+                }
+            }
+        }
     } else {
         // Drop the scheduled broadcast, we're not connected anymore
         return;
@@ -272,7 +287,7 @@ where
         .with_label_values(&[counters::VM_VALIDATION_LABEL])
         .start_timer();
     let validation_results = transactions
-        .par_iter()
+        .iter()
         .map(|t| smp.validator.read().validate_transaction(t.0.clone()))
         .collect::<Vec<_>>();
     vm_validation_timer.stop_and_record();
@@ -360,7 +375,10 @@ fn log_txn_process_results(results: &[SubmissionStatusBundle], sender: Option<Pe
 
 /// Only applies to Validators. Either provides transactions to consensus [`GetBlockRequest`] or
 /// handles rejecting transactions [`RejectNotification`]
-pub(crate) fn process_consensus_request(mempool: &Mutex<CoreMempool>, req: ConsensusRequest) {
+pub(crate) fn process_consensus_request<V: TransactionValidation>(
+    smp: &SharedMempool<V>,
+    req: ConsensusRequest,
+) {
     // Start latency timer
     let start_time = Instant::now();
     debug!(LogSchema::event_log(LogEntry::Consensus, LogEvent::Received).consensus_msg(&req));
@@ -373,7 +391,7 @@ pub(crate) fn process_consensus_request(mempool: &Mutex<CoreMempool>, req: Conse
                 .collect();
             let mut txns;
             {
-                let mut mempool = mempool.lock();
+                let mut mempool = smp.mempool.lock();
                 // gc before pulling block as extra protection against txns that may expire in consensus
                 // Note: this gc operation relies on the fact that consensus uses the system time to determine block timestamp
                 let curr_time = diem_infallible::duration_since_epoch();
@@ -396,7 +414,7 @@ pub(crate) fn process_consensus_request(mempool: &Mutex<CoreMempool>, req: Conse
                 counters::COMMIT_CONSENSUS_LABEL,
                 transactions.len(),
             );
-            process_committed_transactions(mempool, transactions, 0, true);
+            process_committed_transactions(&smp.mempool, transactions, 0, true);
             (
                 ConsensusResponse::CommitResponse(),
                 callback,
@@ -419,7 +437,7 @@ pub(crate) fn process_consensus_request(mempool: &Mutex<CoreMempool>, req: Conse
 }
 
 /// Remove transactions that are committed (or rejected) so that we can stop broadcasting them.
-pub fn process_committed_transactions(
+pub(crate) fn process_committed_transactions(
     mempool: &Mutex<CoreMempool>,
     transactions: Vec<TransactionSummary>,
     block_timestamp_usecs: u64,

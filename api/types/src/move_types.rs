@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{Address, Bytecode};
-use diem_types::transaction::Module;
+
+use anyhow::format_err;
+use diem_types::{event::EventKey, transaction::Module};
 use move_binary_format::{
     access::ModuleAccess,
     file_format::{
@@ -13,6 +15,7 @@ use move_core_types::{
     account_address::AccountAddress,
     identifier::Identifier,
     language_storage::{ModuleId, StructTag, TypeTag},
+    parser::{parse_struct_tag, parse_type_tag},
     transaction_argument::TransactionArgument,
 };
 use resource_viewer::{AnnotatedMoveStruct, AnnotatedMoveValue};
@@ -29,8 +32,8 @@ use std::{
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MoveResource {
     #[serde(rename = "type")]
-    pub typ: MoveResourceType,
-    pub value: MoveStructValue,
+    pub typ: MoveStructTag,
+    pub data: MoveStructValue,
 }
 
 impl TryFrom<AnnotatedMoveStruct> for MoveResource {
@@ -38,21 +41,9 @@ impl TryFrom<AnnotatedMoveStruct> for MoveResource {
 
     fn try_from(s: AnnotatedMoveStruct) -> anyhow::Result<Self> {
         Ok(Self {
-            typ: MoveResourceType::Struct(s.type_.clone().into()),
-            value: s.try_into()?,
+            typ: s.type_.clone().into(),
+            data: s.try_into()?,
         })
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum MoveResourceType {
-    Struct(MoveStructTag),
-}
-
-impl From<StructTag> for MoveResourceType {
-    fn from(s: StructTag) -> Self {
-        MoveResourceType::Struct(s.into())
     }
 }
 
@@ -161,6 +152,12 @@ impl<'de> Deserialize<'de> for U128 {
 #[derive(Clone, Debug, PartialEq)]
 pub struct HexEncodedBytes(Vec<u8>);
 
+impl HexEncodedBytes {
+    pub fn json(&self) -> anyhow::Result<serde_json::Value> {
+        Ok(serde_json::to_value(self)?)
+    }
+}
+
 impl FromStr for HexEncodedBytes {
     type Err = anyhow::Error;
 
@@ -208,6 +205,13 @@ impl From<HexEncodedBytes> for move_core_types::value::MoveValue {
                 .map(move_core_types::value::MoveValue::U8)
                 .collect(),
         )
+    }
+}
+
+impl TryFrom<HexEncodedBytes> for EventKey {
+    type Error = anyhow::Error;
+    fn try_from(bytes: HexEncodedBytes) -> anyhow::Result<Self> {
+        Ok(EventKey::from_bytes(bytes.0)?)
     }
 }
 
@@ -298,12 +302,36 @@ impl Serialize for MoveValue {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MoveStructTag {
     pub address: Address,
     pub module: Identifier,
     pub name: Identifier,
     pub generic_type_params: Vec<MoveType>,
+}
+
+impl MoveStructTag {
+    pub fn new(
+        address: Address,
+        module: Identifier,
+        name: Identifier,
+        generic_type_params: Vec<MoveType>,
+    ) -> Self {
+        Self {
+            address,
+            module,
+            name,
+            generic_type_params,
+        }
+    }
+}
+
+impl FromStr for MoveStructTag {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> anyhow::Result<Self, anyhow::Error> {
+        Ok(parse_struct_tag(s)?.into())
+    }
 }
 
 impl From<StructTag> for MoveStructTag {
@@ -314,6 +342,37 @@ impl From<StructTag> for MoveStructTag {
             name: tag.name,
             generic_type_params: tag.type_params.into_iter().map(MoveType::from).collect(),
         }
+    }
+}
+
+impl fmt::Display for MoveStructTag {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}::{}::{}", self.address, self.module, self.name)?;
+        if let Some(first_ty) = self.generic_type_params.first() {
+            write!(f, "<")?;
+            write!(f, "{}", first_ty)?;
+            for ty in self.generic_type_params.iter().skip(1) {
+                write!(f, ", {}", ty)?;
+            }
+            write!(f, ">")?;
+        }
+        Ok(())
+    }
+}
+
+impl Serialize for MoveStructTag {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.to_string().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for MoveStructTag {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let data = <String>::deserialize(deserializer)?;
+        data.parse().map_err(D::Error::custom)
     }
 }
 
@@ -333,8 +392,7 @@ impl TryFrom<MoveStructTag> for StructTag {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Clone, Debug, PartialEq)]
 pub enum MoveType {
     Bool,
     U8,
@@ -346,6 +404,53 @@ pub enum MoveType {
     Struct(MoveStructTag),
     GenericTypeParam { index: u16 },
     Reference { mutable: bool, to: Box<MoveType> },
+}
+
+impl fmt::Display for MoveType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MoveType::U8 => write!(f, "u8"),
+            MoveType::U64 => write!(f, "u64"),
+            MoveType::U128 => write!(f, "u128"),
+            MoveType::Address => write!(f, "address"),
+            MoveType::Signer => write!(f, "signer"),
+            MoveType::Bool => write!(f, "bool"),
+            MoveType::Vector { items } => write!(f, "vector<{}>", items),
+            MoveType::Struct(s) => write!(f, "{}", s),
+            MoveType::GenericTypeParam { index } => write!(f, "T{}", index),
+            MoveType::Reference { mutable, to } => {
+                if *mutable {
+                    write!(f, "&mut {}", to)
+                } else {
+                    write!(f, "&{}", to)
+                }
+            }
+        }
+    }
+}
+
+impl FromStr for MoveType {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(parse_type_tag(s)?.into())
+    }
+}
+
+impl Serialize for MoveType {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.to_string().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for MoveType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let data = <String>::deserialize(deserializer)?;
+        data.parse().map_err(D::Error::custom)
+    }
 }
 
 impl MoveType {
@@ -436,7 +541,7 @@ impl From<CompiledModule> for MoveModule {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MoveModuleId {
     pub address: Address,
     pub name: Identifier,
@@ -461,6 +566,41 @@ impl From<MoveModuleId> for ModuleId {
 impl fmt::Display for MoveModuleId {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}::{}", self.address, self.name)
+    }
+}
+
+impl FromStr for MoveModuleId {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Some((address, name)) = s.split_once("::") {
+            return Ok(Self {
+                address: address.parse().map_err(|_| invalid_move_module_id(s))?,
+                name: name.parse().map_err(|_| invalid_move_module_id(s))?,
+            });
+        }
+        Err(invalid_move_module_id(s))
+    }
+}
+
+#[inline]
+fn invalid_move_module_id(s: &str) -> anyhow::Error {
+    format_err!("invalid Move module id: {}", s)
+}
+
+impl Serialize for MoveModuleId {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.to_string().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for MoveModuleId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let module_id = <String>::deserialize(deserializer)?;
+        module_id.parse().map_err(D::Error::custom)
     }
 }
 
@@ -645,16 +785,16 @@ impl MoveModuleBytecode {
         }
     }
 
-    pub fn ensure_abi(mut self) -> anyhow::Result<Self> {
+    pub fn try_parse_abi(mut self) -> anyhow::Result<Self> {
         if self.abi.is_none() {
-            let module = CompiledModule::deserialize(self.bytecode.inner())?.try_into()?;
-            self.abi = Some(module);
+            // Ignore error, because it is possible a transaction module payload contains
+            // invalid bytecode.
+            // So we ignore the error and output bytecode without abi.
+            if let Ok(module) = CompiledModule::deserialize(self.bytecode.inner()) {
+                self.abi = Some(module.try_into()?);
+            }
         }
         Ok(self)
-    }
-
-    pub fn into_abi(self) -> anyhow::Result<MoveModule> {
-        Ok(self.ensure_abi()?.abi.unwrap())
     }
 }
 
@@ -678,22 +818,72 @@ impl MoveScriptBytecode {
         }
     }
 
-    pub fn ensure_abi(mut self) -> anyhow::Result<Self> {
+    pub fn try_parse_abi(mut self) -> Self {
         if self.abi.is_none() {
-            let func = (&CompiledScript::deserialize(self.bytecode.inner())?).into();
-            self.abi = Some(func);
+            // ignore error, because it is possible a transaction script payload contains
+            // invalid bytecode.
+            // So we ignore the error and output bytecode without abi.
+            if let Ok(script) = CompiledScript::deserialize(self.bytecode.inner()) {
+                self.abi = Some((&script).into());
+            }
         }
-        Ok(self)
+        self
     }
+}
 
-    pub fn into_abi(self) -> anyhow::Result<MoveFunction> {
-        Ok(self.ensure_abi()?.abi.unwrap())
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScriptFunctionId {
+    pub module: MoveModuleId,
+    pub name: Identifier,
+}
+
+impl FromStr for ScriptFunctionId {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Some((module, name)) = s.rsplit_once("::") {
+            return Ok(Self {
+                module: module.parse().map_err(|_| invalid_script_function_id(s))?,
+                name: name.parse().map_err(|_| invalid_script_function_id(s))?,
+            });
+        }
+        Err(invalid_script_function_id(s))
+    }
+}
+
+#[inline]
+fn invalid_script_function_id(s: &str) -> anyhow::Error {
+    format_err!("invalid script function id: {}", s)
+}
+
+impl Serialize for ScriptFunctionId {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.to_string().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ScriptFunctionId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let script_fun_id = <String>::deserialize(deserializer)?;
+        script_fun_id.parse().map_err(D::Error::custom)
+    }
+}
+
+impl fmt::Display for ScriptFunctionId {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}::{}", self.module, self.name)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{HexEncodedBytes, MoveResource, MoveType, U128, U64};
+    use crate::{
+        move_types::ScriptFunctionId, HexEncodedBytes, MoveModuleId, MoveResource, MoveType, U128,
+        U64,
+    };
 
     use diem_types::account_address::AccountAddress;
     use move_binary_format::file_format::AbilitySet;
@@ -714,65 +904,18 @@ mod tests {
             let value = to_value(MoveType::from(t)).unwrap();
             assert_json(value, expected)
         }
-        assert_serialize(Bool, json!({"type": "bool"}));
-        assert_serialize(U8, json!({"type": "u8"}));
-        assert_serialize(U64, json!({"type": "u64"}));
-        assert_serialize(U128, json!({"type": "u128"}));
-        assert_serialize(Address, json!({"type": "address"}));
-        assert_serialize(Signer, json!({"type": "signer"}));
+        assert_serialize(Bool, json!("bool"));
+        assert_serialize(U8, json!("u8"));
+        assert_serialize(U64, json!("u64"));
+        assert_serialize(U128, json!("u128"));
+        assert_serialize(Address, json!("address"));
+        assert_serialize(Signer, json!("signer"));
 
-        assert_serialize(
-            Vector(Box::new(U8)),
-            json!({"type": "vector", "items": {"type": "u8"}}),
-        );
+        assert_serialize(Vector(Box::new(U8)), json!("vector<u8>"));
 
         assert_serialize(
             Struct(create_nested_struct()),
-            json!({
-                "type": "struct",
-                "address": "0x1",
-                "module": "Home",
-                "name": "ABC",
-                "generic_type_params": [
-                    {
-                        "type": "address"
-                    },
-                    {
-                        "type": "struct",
-                        "address": "0x1",
-                        "module": "Account",
-                        "name": "Base",
-                        "generic_type_params": [
-                            {
-                                "type": "u128"
-                            },
-                            {
-                                "type": "vector",
-                                "items": {
-                                    "type": "u64"
-                                }
-                            },
-                            {
-                                "type": "vector",
-                                "items": {
-                                    "type": "struct",
-                                    "address": "0x1",
-                                    "module": "Type",
-                                    "name": "String",
-                                    "generic_type_params": []
-                                }
-                            },
-                            {
-                                "type": "struct",
-                                "address": "0x1",
-                                "module": "Type",
-                                "name": "String",
-                                "generic_type_params": []
-                            }
-                        ]
-                    }
-                ]
-            }),
+            json!("0x1::Home::ABC<address, 0x1::Account::Base<u128, vector<u64>, vector<0x1::Type::String>, 0x1::Type::String>>"),
         );
     }
 
@@ -819,14 +962,8 @@ mod tests {
         assert_json(
             value,
             json!({
-                "type": {
-                    "type": "struct",
-                    "address": "0x1",
-                    "module": "Type",
-                    "name": "Values",
-                    "generic_type_params": []
-                },
-                "value": {
+                "type": "0x1::Type::Values",
+                "data": {
                     "field_u8": 7,
                     "field_u64": "7",
                     "field_u128": "7",
@@ -856,14 +993,8 @@ mod tests {
         assert_json(
             value,
             json!({
-                "type": {
-                    "type": "struct",
-                    "address": "0x1",
-                    "module": "Type",
-                    "name": "Values",
-                    "generic_type_params": []
-                },
-                "value": {
+                "type": "0x1::Type::Values",
+                "data": {
                     "address_0x0": "0x0",
                 }
             }),
@@ -878,6 +1009,127 @@ mod tests {
     #[test]
     fn test_serialize_deserialize_u128() {
         test_serialize_deserialize(U128::from(u128::MAX), json!(u128::MAX.to_string()))
+    }
+
+    #[test]
+    fn test_serialize_deserialize_move_module_id() {
+        test_serialize_deserialize(
+            MoveModuleId {
+                address: "0x1".parse().unwrap(),
+                name: "Diem".parse().unwrap(),
+            },
+            json!("0x1::Diem"),
+        );
+    }
+
+    #[test]
+    fn test_parse_invalid_move_module_id_string() {
+        assert_eq!(
+            "invalid Move module id: 0x1",
+            "0x1".parse::<MoveModuleId>().err().unwrap().to_string()
+        );
+        assert_eq!(
+            "invalid Move module id: 0x1:",
+            "0x1:".parse::<MoveModuleId>().err().unwrap().to_string()
+        );
+        assert_eq!(
+            "invalid Move module id: 0x1:::",
+            "0x1:::".parse::<MoveModuleId>().err().unwrap().to_string()
+        );
+        assert_eq!(
+            "invalid Move module id: 0x1::???",
+            "0x1::???"
+                .parse::<MoveModuleId>()
+                .err()
+                .unwrap()
+                .to_string()
+        );
+        assert_eq!(
+            "invalid Move module id: Diem::Diem",
+            "Diem::Diem"
+                .parse::<MoveModuleId>()
+                .err()
+                .unwrap()
+                .to_string()
+        );
+        assert_eq!(
+            "invalid Move module id: 0x1::Diem::Diem",
+            "0x1::Diem::Diem"
+                .parse::<MoveModuleId>()
+                .err()
+                .unwrap()
+                .to_string()
+        );
+    }
+
+    #[test]
+    fn test_serialize_deserialize_move_script_function_id() {
+        test_serialize_deserialize(
+            ScriptFunctionId {
+                module: MoveModuleId {
+                    address: "0x1".parse().unwrap(),
+                    name: "Diem".parse().unwrap(),
+                },
+                name: "Add".parse().unwrap(),
+            },
+            json!("0x1::Diem::Add"),
+        );
+    }
+
+    #[test]
+    fn test_parse_invalid_move_script_function_id_string() {
+        assert_eq!(
+            "invalid script function id: 0x1",
+            "0x1".parse::<ScriptFunctionId>().err().unwrap().to_string()
+        );
+        assert_eq!(
+            "invalid script function id: 0x1:",
+            "0x1:"
+                .parse::<ScriptFunctionId>()
+                .err()
+                .unwrap()
+                .to_string()
+        );
+        assert_eq!(
+            "invalid script function id: 0x1:::",
+            "0x1:::"
+                .parse::<ScriptFunctionId>()
+                .err()
+                .unwrap()
+                .to_string()
+        );
+        assert_eq!(
+            "invalid script function id: 0x1::???",
+            "0x1::???"
+                .parse::<ScriptFunctionId>()
+                .err()
+                .unwrap()
+                .to_string()
+        );
+        assert_eq!(
+            "invalid script function id: Diem::Diem",
+            "Diem::Diem"
+                .parse::<ScriptFunctionId>()
+                .err()
+                .unwrap()
+                .to_string()
+        );
+        assert_eq!(
+            "invalid script function id: Diem::Diem::??",
+            "Diem::Diem::??"
+                .parse::<ScriptFunctionId>()
+                .err()
+                .unwrap()
+                .to_string()
+        );
+        assert_eq!(
+            "invalid script function id: 0x1::Diem::Diem::Diem",
+            "0x1::Diem::Diem::Diem"
+                .parse::<ScriptFunctionId>()
+                .err()
+                .unwrap()
+                .to_string()
+        );
     }
 
     #[test]

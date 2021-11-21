@@ -18,10 +18,10 @@ thiserror = "1.0.24"
 
 crash-handler = { path = "../../common/crash-handler" }
 diem-config = { path = "../../config"}
-diem-crypto = { path = "../../crypto/crypto" }
+diem-crypto = { path = "../../crates/diem-crypto" }
 diem-global-constants = { path = "../../config/global-constants"}
 diem-logger = { path = "../../common/logger" }
-diem-client = { path = "../../sdk/client", features = ["blocking"], default-features = false }
+diem-client = { path = "../../crates/diem-client", features = ["blocking"], default-features = false }
 diem-secure-push-metrics = { path = "../push-metrics" }
 diem-secure-storage = { path = "../storage" }
 diem-time-service = { path = "../../common/time-service" }
@@ -42,7 +42,7 @@ diem-json-rpc = { path = "../../json-rpc", features = ["fuzzing"] }
 diem-mempool = { path = "../../mempool"}
 diem-secure-storage = { path = "../storage", features = ["testing"] }
 diem-time-service = { path = "../../common/time-service", features = ["testing"] }
-diem-vm = { path = "../../language/diem-vm" }
+diem-vm = { path = "../../diem-move/diem-vm" }
 diemdb = { path = "../../storage/diemdb" }
 storage-interface= { path = "../../storage/storage-interface" }
 vm-validator = { path = "../../vm-validator" }

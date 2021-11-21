@@ -971,7 +971,25 @@ fn exp_(context: &mut Context, e: E::Exp) -> N::Exp {
         EE::Cast(e, t) => NE::Cast(exp(context, *e), type_(context, t)),
         EE::Annotate(e, t) => NE::Annotate(exp(context, *e), type_(context, t)),
 
-        EE::Call(sp!(mloc, ma_), tys_opt, rhs) => {
+        EE::Call(sp!(mloc, ma_), true, tys_opt, rhs) => {
+            use E::ModuleAccess_ as EA;
+            use N::BuiltinFunction_ as BF;
+            assert!(tys_opt.is_none(), "ICE macros do not have type arguments");
+            let nes = call_args(context, rhs);
+            match ma_ {
+                EA::Name(n) if n.value.as_str() == BF::ASSERT_MACRO => {
+                    NE::Builtin(sp(mloc, BF::Assert(true)), nes)
+                }
+                ma_ => {
+                    context.env.add_diag(diag!(
+                        NameResolution::UnboundMacro,
+                        (mloc, format!("Unbound macro '{}'", ma_)),
+                    ));
+                    NE::UnresolvedError
+                }
+            }
+        }
+        EE::Call(sp!(mloc, ma_), false, tys_opt, rhs) => {
             use E::ModuleAccess_ as EA;
             let ty_args = tys_opt.map(|tys| types(context, tys));
             let nes = call_args(context, rhs);
@@ -1002,6 +1020,24 @@ fn exp_(context: &mut Context, e: E::Exp) -> N::Exp {
                 },
             }
         }
+        EE::Vector(vec_loc, tys_opt, rhs) => {
+            let ty_args = tys_opt.map(|tys| types(context, tys));
+            let nes = call_args(context, rhs);
+            let ty_opt = check_builtin_ty_args_impl(
+                context,
+                vec_loc,
+                || "Invalid 'vector' instantation".to_string(),
+                eloc,
+                1,
+                ty_args,
+            )
+            .map(|mut v| {
+                assert!(v.len() == 1);
+                v.pop().unwrap()
+            });
+            NE::Vector(vec_loc, ty_opt, nes)
+        }
+
         EE::Spec(u, unbound_names) => {
             // Vars currently aren't shadowable by types/functions
             let used_locals = unbound_names.into_iter().map(Var).collect();
@@ -1121,9 +1157,24 @@ fn resolve_builtin_function(
         B::BORROW_GLOBAL_MUT => BorrowGlobal(true, check_builtin_ty_arg(context, loc, b, ty_args)),
         B::EXISTS => Exists(check_builtin_ty_arg(context, loc, b, ty_args)),
         B::FREEZE => Freeze(check_builtin_ty_arg(context, loc, b, ty_args)),
-        B::ASSERT => {
+        B::ASSERT_MACRO => {
+            let dep_msg = format!(
+                "'{}' function syntax has been deprecated and will be removed",
+                B::ASSERT_MACRO
+            );
+            // TODO make this a tip/hint?
+            let help_msg = format!(
+                "Replace with '{0}!'. \
+                '{0}' has been replaced with a '{0}!' built-in macro so that arguments are no longer eagerly evaluated",
+                B::ASSERT_MACRO
+            );
+            context.env.add_diag(diag!(
+                Uncategorized::DeprecatedWillBeRemoved,
+                (b.loc, dep_msg),
+                (b.loc, help_msg),
+            ));
             check_builtin_ty_args(context, loc, b, 0, ty_args);
-            Assert
+            Assert(false)
         }
         _ => {
             context.env.add_diag(diag!(
@@ -1155,6 +1206,25 @@ fn check_builtin_ty_args(
     arity: usize,
     ty_args: Option<Vec<N::Type>>,
 ) -> Option<Vec<N::Type>> {
+    check_builtin_ty_args_impl(
+        context,
+        b.loc,
+        || format!("Invalid call to builtin function: '{}'", b),
+        loc,
+        arity,
+        ty_args,
+    )
+}
+
+fn check_builtin_ty_args_impl(
+    context: &mut Context,
+    msg_loc: Loc,
+    fmsg: impl Fn() -> String,
+    targs_loc: Loc,
+    arity: usize,
+    ty_args: Option<Vec<N::Type>>,
+) -> Option<Vec<N::Type>> {
+    let mut msg_opt = None;
     ty_args.map(|mut args| {
         let args_len = args.len();
         if args_len != arity {
@@ -1163,14 +1233,11 @@ fn check_builtin_ty_args(
             } else {
                 NameResolution::TooFewTypeArguments
             };
-            context.env.add_diag(diag!(
-                diag_code,
-                (b.loc, format!("Invalid call to builtin function: '{}'", b)),
-                (
-                    loc,
-                    format!("Expected {} type argument(s) but got {}", arity, args_len),
-                ),
-            ));
+            let msg = msg_opt.get_or_insert_with(fmsg);
+            let targs_msg = format!("Expected {} type argument(s) but got {}", arity, args_len);
+            context
+                .env
+                .add_diag(diag!(diag_code, (msg_loc, msg), (targs_loc, targs_msg)));
         }
 
         while args.len() > arity {
@@ -1178,7 +1245,7 @@ fn check_builtin_ty_args(
         }
 
         while args.len() < arity {
-            args.push(sp(loc, N::Type_::UnresolvedError));
+            args.push(sp(targs_loc, N::Type_::UnresolvedError));
         }
 
         args

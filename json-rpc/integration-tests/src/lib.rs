@@ -635,10 +635,6 @@ impl PublicUsageTest for PeerToPeerWithEvents {
                     "gas_unit_price": 0,
                     "max_gas_amount": 1000000,
                     "public_key": sender.public_key().to_string(),
-                    "secondary_signers": [],
-                    "secondary_signature_schemes": [],
-                    "secondary_signatures": [],
-                    "secondary_public_keys": [],
                     "script": {
                         "type": "peer_to_peer_with_metadata",
                         "type_arguments": [
@@ -788,7 +784,7 @@ impl PublicUsageTest for MempoolValidationError {
             let resp = env.submit(&txn2);
             assert_eq!(
                 resp.error.expect("error").message,
-                "Server error: Mempool submission error: \"Failed to update gas price to 0\""
+                "Server error: Mempool submission error: \"Transaction already in mempool\""
                     .to_string(),
             );
         });

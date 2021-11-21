@@ -316,7 +316,9 @@ macro_rules! ast_stepped_compilers {
                     Ok(())
                 }
 
-                pub fn build(self) -> Result<(Vec<AnnotatedCompiledUnit>, Diagnostics), Diagnostics> {
+                pub fn build(
+                    self
+                ) -> Result<(Vec<AnnotatedCompiledUnit>, Diagnostics), Diagnostics> {
                     let units = self.run::<PASS_COMPILATION>()?.into_compiled_units();
                     Ok(units)
                 }
@@ -484,9 +486,9 @@ macro_rules! file_path {
 /// Fails if the bytecode verifier errors
 pub fn sanity_check_compiled_units(
     files: FilesSourceText,
-    compiled_units: Vec<AnnotatedCompiledUnit>,
+    compiled_units: &[AnnotatedCompiledUnit],
 ) {
-    let (_, ice_errors) = compiled_unit::verify_units(compiled_units);
+    let ice_errors = compiled_unit::verify_units(compiled_units);
     if !ice_errors.is_empty() {
         report_diagnostics(&files, ice_errors)
     }
@@ -520,7 +522,7 @@ pub fn output_compiled_units(
         }};
     }
 
-    let (compiled_units, ice_errors) = compiled_unit::verify_units(compiled_units);
+    let ice_errors = compiled_unit::verify_units(&compiled_units);
     let (modules, scripts): (Vec<_>, Vec<_>) = compiled_units
         .into_iter()
         .partition(|u| matches!(u, AnnotatedCompiledUnit::Module(_)));

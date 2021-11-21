@@ -1,4 +1,4 @@
-FROM debian:buster-20210927@sha256:37b68406b219ca10fd50a49340da9e6e9ac189deecf75c3d3bd90a016d29fbb0 AS setup_ci
+FROM debian:buster-20211011@sha256:f9182ead292f45165f4a851e5ff98ea0800e172ccedce7d17764ffaae5ed4d6e AS setup_ci
 
 RUN mkdir /diem
 COPY rust-toolchain /diem/rust-toolchain
@@ -14,7 +14,7 @@ ENV RUSTUP_HOME "/opt/rustup"
 RUN mkdir -p /github/home && \
     mkdir -p /opt/cargo/ && \
     mkdir -p /opt/git/ && \
-    /diem/scripts/dev_setup.sh -t -o -b -p -y -s -n && \
+    /diem/scripts/dev_setup.sh -t -o -b -p -y -s -n -a && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
@@ -54,6 +54,6 @@ RUN [ -x "$(set -x; command -v shellcheck)" ] \
 
 # should be a no-op
 # sccache builds fine, but is not executable ??? in alpine, ends up being recompiled.  Wierd.
-RUN /diem/scripts/dev_setup.sh -t -o -y -b -p -s
+RUN /diem/scripts/dev_setup.sh -t -o -y -b -p -s -a
 
 FROM setup_ci as build_environment

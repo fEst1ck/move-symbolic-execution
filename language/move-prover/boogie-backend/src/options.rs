@@ -15,6 +15,7 @@ const DEFAULT_BOOGIE_FLAGS: &[&str] = &[
     "-printModel:1",
     "-enhancedErrorMessages:1",
     "-monomorphize",
+    "-proverOpt:O:model_validate=true",
 ];
 
 const MIN_BOOGIE_VERSION: &str = "2.9.0";
@@ -170,7 +171,7 @@ impl BoogieOptions {
         add(DEFAULT_BOOGIE_FLAGS);
         if self.use_cvc4 {
             add(&[
-                "-proverOpt:SOLVER=cvc4",
+                "-proverOpt:SOLVER=cvc5",
                 &format!("-proverOpt:PROVER_PATH={}", &self.cvc4_exe),
             ]);
         } else {

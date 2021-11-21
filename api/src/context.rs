@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use diem_api_types::{Error, LedgerInfo, MoveConverter, TransactionOnChainData};
+use diem_config::config::{ApiConfig, JsonRpcConfig, RoleType};
 use diem_crypto::HashValue;
 use diem_mempool::{MempoolClientRequest, MempoolClientSender, SubmissionStatus};
 use diem_types::{
@@ -9,11 +10,13 @@ use diem_types::{
     account_state::AccountState,
     account_state_blob::AccountStateBlob,
     chain_id::ChainId,
+    contract_event::ContractEvent,
+    event::EventKey,
     ledger_info::LedgerInfoWithSignatures,
     protocol_spec::DpnProto,
     transaction::{SignedTransaction, TransactionInfo},
 };
-use storage_interface::MoveDbReader;
+use storage_interface::{MoveDbReader, Order};
 
 use anyhow::{ensure, format_err, Result};
 use futures::{channel::oneshot, SinkExt};
@@ -22,7 +25,7 @@ use std::{
     convert::{Infallible, TryFrom},
     sync::Arc,
 };
-use warp::Filter;
+use warp::{filters::BoxedFilter, Filter, Reply};
 
 // Context holds application scope context
 #[derive(Clone)]
@@ -30,6 +33,9 @@ pub struct Context {
     chain_id: ChainId,
     db: Arc<dyn MoveDbReader<DpnProto>>,
     mp_sender: MempoolClientSender,
+    role: RoleType,
+    jsonrpc_config: JsonRpcConfig,
+    api_config: ApiConfig,
 }
 
 impl Context {
@@ -37,11 +43,17 @@ impl Context {
         chain_id: ChainId,
         db: Arc<dyn MoveDbReader<DpnProto>>,
         mp_sender: MempoolClientSender,
+        role: RoleType,
+        jsonrpc_config: JsonRpcConfig,
+        api_config: ApiConfig,
     ) -> Self {
         Self {
             chain_id,
             db,
             mp_sender,
+            role,
+            jsonrpc_config,
+            api_config,
         }
     }
 
@@ -51,6 +63,10 @@ impl Context {
 
     pub fn chain_id(&self) -> ChainId {
         self.chain_id
+    }
+
+    pub fn content_length_limit(&self) -> u64 {
+        self.api_config.content_length_limit()
     }
 
     pub fn filter(self) -> impl Filter<Extract = (Context,), Error = Infallible> + Clone {
@@ -141,6 +157,23 @@ impl Context {
             .collect())
     }
 
+    pub fn get_account_transactions(
+        &self,
+        address: AccountAddress,
+        start_seq_number: u64,
+        limit: u16,
+        ledger_version: u64,
+    ) -> Result<Vec<TransactionOnChainData<TransactionInfo>>> {
+        let txns = self.db.get_account_transactions(
+            address,
+            start_seq_number,
+            limit as u64,
+            true,
+            ledger_version,
+        )?;
+        Ok(txns.into_inner().into_iter().map(|t| t.into()).collect())
+    }
+
     pub fn get_transaction_by_hash(
         &self,
         hash: HashValue,
@@ -176,5 +209,36 @@ impl Context {
             .db
             .get_transaction_by_version(version, ledger_version, true)?
             .into())
+    }
+
+    pub fn get_events(
+        &self,
+        event_key: &EventKey,
+        start: u64,
+        limit: u16,
+        ledger_version: u64,
+    ) -> Result<Vec<ContractEvent>> {
+        let events = self
+            .db
+            .get_events(event_key, start, Order::Ascending, limit as u64)?;
+        Ok(events
+            .into_iter()
+            .filter(|(version, _event)| version <= &ledger_version)
+            .map(|(_, event)| event)
+            .collect::<Vec<_>>())
+    }
+
+    pub fn health_check_route(&self) -> BoxedFilter<(impl Reply,)> {
+        diem_json_rpc::runtime::health_check_route(self.db.clone())
+    }
+
+    pub fn jsonrpc_routes(&self) -> BoxedFilter<(impl Reply,)> {
+        diem_json_rpc::runtime::jsonrpc_routes(
+            self.db.clone(),
+            self.mp_sender.clone(),
+            self.role,
+            self.chain_id,
+            &self.jsonrpc_config,
+        )
     }
 }

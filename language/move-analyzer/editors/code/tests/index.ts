@@ -10,11 +10,16 @@
 import * as glob from 'glob';
 import * as Mocha from 'mocha';
 import * as path from 'path';
-
+/* eslint-disable */
+// deno-lint-ignore require-await
 export async function run(): Promise<void> {
+    /* eslint-disable */
     const suite = new Mocha({
         ui: 'tdd',
         color: true,
+        // The default timeout of 2000 miliseconds can sometimes be too quick, since the extension
+        // tests need to launch VS Code first.
+        timeout: 5000,
     });
 
     const testsRoot = path.resolve(__dirname, '..');

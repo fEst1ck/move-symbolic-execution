@@ -19,7 +19,7 @@ use diem_crypto::{
 };
 use diem_infallible::{RwLock, RwLockReadGuard};
 use diem_logger::prelude::*;
-use diem_state_view::StateViewId;
+use diem_state_view::{StateView, StateViewId};
 use diem_types::{
     account_address::{AccountAddress, HashAccountAddress},
     account_state::AccountState,
@@ -28,11 +28,11 @@ use diem_types::{
     epoch_state::EpochState,
     ledger_info::LedgerInfoWithSignatures,
     on_chain_config,
-    proof::accumulator::InMemoryAccumulator,
+    proof::{accumulator::InMemoryAccumulator, TransactionInfoListWithProof},
     protocol_spec::{DpnProto, ProtocolSpec},
     transaction::{
-        Transaction, TransactionInfoTrait, TransactionListWithProof, TransactionOutput,
-        TransactionPayload, TransactionStatus, TransactionToCommit, Version,
+        Transaction, TransactionInfoTrait, TransactionOutput, TransactionPayload,
+        TransactionStatus, TransactionToCommit, Version,
     },
     write_set::{WriteOp, WriteSet, WriteSetMut},
 };
@@ -162,33 +162,40 @@ where
         Ok(None)
     }
 
-    /// Verify input chunk and return transactions to be applied, skipping those already persisted.
+    /// Skip the already-persisted chunk and return transactions and optional outputs to be applied.
     /// Specifically:
-    ///  1. Verify that input transactions belongs to the ledger represented by the ledger info.
-    ///  2. Verify that transactions to skip match what's already persisted (no fork).
-    ///  3. Return Transactions to be applied.
-    fn verify_chunk(
+    ///  1. Verify that transactions to skip match what's already persisted (no fork).
+    ///  2. Return transactions, outputs and txn_infos to be applied.
+    fn filter_chunk(
         &self,
-        txn_list_with_proof: TransactionListWithProof<PS::TransactionInfo>,
-        verified_target_li: &LedgerInfoWithSignatures,
-    ) -> Result<(Vec<Transaction>, Vec<PS::TransactionInfo>)> {
-        // 1. Verify that input transactions belongs to the ledger represented by the ledger info.
-        txn_list_with_proof.verify(
-            verified_target_li.ledger_info(),
-            txn_list_with_proof.first_transaction_version,
-        )?;
+        mut transactions: Vec<Transaction>,
+        mut txn_outputs: Option<Vec<TransactionOutput>>,
+        first_version: Option<Version>,
+        proof: TransactionInfoListWithProof<PS::TransactionInfo>,
+    ) -> Result<(
+        Vec<Transaction>,
+        Option<Vec<TransactionOutput>>,
+        Vec<PS::TransactionInfo>,
+    )> {
+        if let Some(ref outputs) = txn_outputs {
+            ensure!(
+                outputs.len() == transactions.len(),
+                "the number of transactions {} doesn't \
+                 match the number of transactions outputs {}.",
+                transactions.len(),
+                outputs.len()
+            );
+        }
 
         // Return empty if there's no work to do.
-        if txn_list_with_proof.transactions.is_empty() {
-            return Ok((Vec::new(), Vec::new()));
+        if transactions.is_empty() {
+            return Ok((vec![], None, vec![]));
         }
-        let first_txn_version = match txn_list_with_proof.first_transaction_version {
+
+        let first_txn_version = match first_version {
             Some(tx) => tx as Version,
             None => {
-                bail!(
-                    "first_transaction_version doesn't exist in {:?}",
-                    txn_list_with_proof
-                );
+                bail!("first_txn_version doesn't exist",);
             }
         };
         let read_lock = self.cache.read();
@@ -201,9 +208,9 @@ where
             first_txn_version
         );
         let versions_between_first_and_committed = num_committed_txns - first_txn_version;
-        if txn_list_with_proof.transactions.len() <= versions_between_first_and_committed as usize {
+        if transactions.len() <= versions_between_first_and_committed as usize {
             // All already in DB, nothing to do.
-            return Ok((Vec::new(), Vec::new()));
+            return Ok((vec![], None, vec![]));
         }
 
         // 2. Verify that skipped transactions match what's already persisted (no fork):
@@ -211,17 +218,15 @@ where
 
         debug!(
             LogSchema::new(LogEntry::ChunkExecutor).num(num_txns_to_skip),
-            "skipping_chunk_txns"
+            "skipping_chunk_txns(outputs)"
         );
 
         // If the proof is verified, then the length of txn_infos and txns must be the same.
-        let skipped_transaction_infos =
-            &txn_list_with_proof.proof.transaction_infos[..num_txns_to_skip as usize];
+        let skipped_transaction_infos = &proof.transaction_infos[..num_txns_to_skip as usize];
 
         // Left side of the proof happens to be the frozen subtree roots of the accumulator
         // right before the list of txns are applied.
-        let frozen_subtree_roots_from_proof = txn_list_with_proof
-            .proof
+        let frozen_subtree_roots_from_proof = proof
             .ledger_info_to_transaction_infos_proof
             .left_siblings()
             .iter()
@@ -245,12 +250,14 @@ where
         );
 
         // 3. Return verified transactions to be applied.
-        let mut txns: Vec<_> = txn_list_with_proof.transactions;
-        txns.drain(0..num_txns_to_skip as usize);
-        let mut txn_infos = txn_list_with_proof.proof.transaction_infos;
+        transactions.drain(0..num_txns_to_skip as usize);
+        if let Some(ref mut outputs) = txn_outputs {
+            outputs.drain(0..num_txns_to_skip as usize);
+        }
+        let mut txn_infos = proof.transaction_infos;
         txn_infos.drain(0..num_txns_to_skip as usize);
 
-        Ok((txns, txn_infos))
+        Ok((transactions, txn_outputs, txn_infos))
     }
 
     /// Post-processing of what the VM outputs. Returns the entire block's output.
@@ -473,6 +480,7 @@ where
         &self,
         first_version: u64,
         transactions: Vec<Transaction>,
+        transaction_outputs: Option<Vec<TransactionOutput>>,
         transaction_infos: Vec<PS::TransactionInfo>,
     ) -> Result<(
         ProcessedVMOutput,
@@ -494,13 +502,37 @@ where
         fail_point!("executor::vm_execute_chunk", |_| {
             Err(anyhow::anyhow!("Injected error in execute_chunk"))
         });
-        let vm_outputs = V::execute_block(transactions.clone(), &state_view)?;
+
+        let transactions_executed = transaction_outputs.is_none();
+        let vm_outputs = if let Some(outputs) = transaction_outputs {
+            ensure!(
+                transactions.len() == outputs.len(),
+                "the number of transactions {} doesn't \
+                 match the number of transactions outputs {}.",
+                transactions.len(),
+                outputs.len()
+            );
+            for (access_path, _) in outputs.iter().map(|o| o.write_set()).flatten() {
+                state_view.get(access_path)?;
+            }
+            outputs
+        } else {
+            V::execute_block(transactions.clone(), &state_view)?
+        };
 
         // Since other validators have committed these transactions, their status should all be
         // TransactionStatus::Keep.
-        for output in &vm_outputs {
-            if let TransactionStatus::Discard(_) = output.status() {
-                bail!("Syncing transactions that should be discarded.");
+        for (index, output) in vm_outputs.iter().enumerate() {
+            if let TransactionStatus::Discard(status_code) = output.status() {
+                let bail_error_message = format!(
+                    "Syncing a transaction that should be discarded! Transaction version: {:?}, status code: {:?}.",
+                    first_version + index as u64, status_code
+                );
+                error!("{}", bail_error_message);
+                info!("Discarded transaction: {:?}", transactions[index]);
+                info!("Discarded transaction output: {:?}", output);
+                info!("Transactions were executed: {:?}", transactions_executed);
+                bail!(bail_error_message);
             }
         }
 
@@ -574,34 +606,6 @@ where
             txn_infos_to_retry,
         ))
     }
-
-    fn execute_chunk(
-        &self,
-        first_version: u64,
-        transactions: Vec<Transaction>,
-        transaction_infos: Vec<PS::TransactionInfo>,
-    ) -> Result<(
-        ProcessedVMOutput,
-        Vec<TransactionToCommit>,
-        Vec<ContractEvent>,
-    )> {
-        let num_txns = transactions.len();
-
-        let (processed_vm_output, txns_to_commit, events, txns_to_retry, _txn_infos_to_retry) =
-            self.replay_transactions_impl(first_version, transactions, transaction_infos)?;
-
-        ensure!(
-            txns_to_retry.is_empty(),
-            "The transaction at version {} got the status of 'Retry'",
-            num_txns
-                .checked_sub(txns_to_retry.len())
-                .ok_or_else(|| format_err!("integer overflow occurred"))?
-                .checked_add(first_version as usize)
-                .ok_or_else(|| format_err!("integer overflow occurred"))?,
-        );
-
-        Ok((processed_vm_output, txns_to_commit, events))
-    }
 }
 
 /// For all accounts modified by this transaction, find the previous blob and update it based
@@ -632,7 +636,7 @@ pub fn process_write_set(
                         bail!("Write set should be a subset of read set.")
                     }
                     Transaction::UserTransaction(txn) => match txn.payload() {
-                        TransactionPayload::Module(_)
+                        TransactionPayload::ModuleBundle(_)
                         | TransactionPayload::Script(_)
                         | TransactionPayload::ScriptFunction(_) => {
                             bail!("Write set should be a subset of read set.")

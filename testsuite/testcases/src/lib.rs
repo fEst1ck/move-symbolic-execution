@@ -6,11 +6,17 @@ pub mod fixed_tps_test;
 pub mod gas_price_test;
 pub mod partial_nodes_down_test;
 pub mod performance_test;
+pub mod reconfiguration_test;
 
-use diem_sdk::types::PeerId;
+use diem_sdk::{
+    client::Client as JsonRpcClient, transaction_builder::TransactionFactory, types::PeerId,
+};
 use forge::{EmitJobRequest, NetworkContext, NodeExt, Result, TxnEmitter, TxnStats, Version};
 use rand::SeedableRng;
-use std::time::{Duration, Instant};
+use std::{
+    convert::TryInto,
+    time::{Duration, Instant},
+};
 use tokio::runtime::Runtime;
 
 fn batch_update<'t>(
@@ -49,11 +55,19 @@ pub fn generate_traffic<'t>(
         .filter(|v| validators.contains(&v.peer_id()))
         .map(|n| n.async_json_rpc_client())
         .collect::<Vec<_>>();
-    let mut emitter = TxnEmitter::new(ctx.swarm().chain_info(), rng);
-    let emit_job_request = match fixed_tps {
-        Some(tps) => EmitJobRequest::fixed_tps(validator_clients, tps, gas_price),
-        None => EmitJobRequest::default(validator_clients, gas_price),
-    };
+    let chain_info = ctx.swarm().chain_info();
+    let transaction_factory = TransactionFactory::new(chain_info.chain_id);
+    let mut emitter = TxnEmitter::new(
+        chain_info.treasury_compliance_account,
+        chain_info.designated_dealer_account,
+        JsonRpcClient::new(&chain_info.json_rpc_url),
+        transaction_factory,
+        rng,
+    );
+    let mut emit_job_request = EmitJobRequest::new(validator_clients).gas_price(gas_price);
+    if let Some(target_tps) = fixed_tps {
+        emit_job_request = emit_job_request.fixed_tps(target_tps.try_into().unwrap());
+    }
     let stats = rt.block_on(emitter.emit_txn_for(duration, emit_job_request))?;
 
     Ok(stats)

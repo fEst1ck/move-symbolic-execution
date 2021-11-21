@@ -7,6 +7,7 @@ use diem_api_types::{Error, TransactionId};
 
 use anyhow::Result;
 use serde::Deserialize;
+use std::num::NonZeroU16;
 
 const DEFAULT_PAGE_SIZE: u16 = 25;
 const MAX_PAGE_SIZE: u16 = 1000;
@@ -14,21 +15,21 @@ const MAX_PAGE_SIZE: u16 = 1000;
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct Page {
     start: Option<TransactionVersionParam>,
-    limit: Option<Param<u16>>,
+    limit: Option<Param<NonZeroU16>>,
 }
 
 impl Page {
-    pub fn start(&self, latest_ledger_version: u64) -> Result<u64, Error> {
+    pub fn start(&self, default: u64, max: u64) -> Result<u64, Error> {
         let version = self
             .start
             .clone()
             .map(|v| v.parse("start"))
-            .unwrap_or_else(|| Ok(latest_ledger_version))?;
-        if version > latest_ledger_version {
+            .unwrap_or_else(|| Ok(default))?;
+        if version > max {
             return Err(Error::not_found(
                 "transaction",
                 TransactionId::Version(version),
-                latest_ledger_version,
+                max,
             ));
         }
         Ok(version)
@@ -39,7 +40,8 @@ impl Page {
             .limit
             .clone()
             .map(|v| v.parse("limit"))
-            .unwrap_or_else(|| Ok(DEFAULT_PAGE_SIZE))?;
+            .unwrap_or_else(|| Ok(NonZeroU16::new(DEFAULT_PAGE_SIZE).unwrap()))?
+            .get();
         if limit > MAX_PAGE_SIZE {
             return Err(Error::invalid_param(
                 "limit",

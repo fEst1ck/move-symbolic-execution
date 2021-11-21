@@ -10,7 +10,10 @@ use diem_metrics::monitor;
 use diem_types::transaction::TransactionStatus;
 use executor_types::StateComputeResult;
 use fail::fail_point;
-use futures::channel::{mpsc, oneshot};
+use futures::{
+    channel::{mpsc, oneshot},
+    future::BoxFuture,
+};
 use itertools::Itertools;
 use std::time::Duration;
 use tokio::time::{sleep, timeout};
@@ -87,6 +90,8 @@ impl TxnManager for MempoolProxy {
         &self,
         max_size: u64,
         exclude_payloads: Vec<&Payload>,
+        wait_callback: BoxFuture<'static, ()>,
+        pending_ordering: bool,
     ) -> Result<Payload, MempoolError> {
         fail_point!("consensus::pull_txns", |_| {
             Err(anyhow::anyhow!("Injected error in pull_txns").into())
@@ -100,13 +105,16 @@ impl TxnManager for MempoolProxy {
                 });
             }
         }
-        let no_pending_txns = exclude_txns.is_empty();
+        let mut callback_wrapper = Some(wait_callback);
         // keep polling mempool until there's txn available or there's still pending txns
         let mut count = self.poll_count;
         let txns = loop {
             count -= 1;
             let txns = self.pull_internal(max_size, exclude_txns.clone()).await?;
-            if txns.is_empty() && no_pending_txns && count > 0 {
+            if txns.is_empty() && !pending_ordering && count > 0 {
+                if let Some(callback) = callback_wrapper.take() {
+                    callback.await;
+                }
                 sleep(Duration::from_millis(NO_TXN_DELAY)).await;
                 continue;
             }

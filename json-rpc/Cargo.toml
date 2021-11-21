@@ -29,11 +29,12 @@ proptest = { version = "1.0.0", optional = true }
 regex = { version = "1.4.3", default-features = false, features = ["std", "perf"] }
 
 bcs = "0.1.2"
-diem-framework-releases= { path = "../language/diem-framework/DPN/releases" }
-diem-client = { path = "../sdk/client", optional = true }
+diem-framework-releases= { path = "../diem-move/diem-framework/DPN/releases" }
+diem-client = { path = "../crates/diem-client", optional = true }
 diem-config = { path = "../config" }
-diem-crypto = { path = "../crypto/crypto" }
+diem-crypto = { path = "../crates/diem-crypto" }
 diemdb = { path = "../storage/diemdb", optional = true }
+diem-id-generator = { path = "../common/id-generator" }
 diem-json-rpc-types = { path = "./types", package = "diem-json-rpc-types" }
 diem-infallible = { path = "../common/infallible" }
 diem-logger = { path = "../common/logger" }
@@ -52,7 +53,7 @@ resource-viewer = { path = "../language/tools/resource-viewer" }
 scratchpad = { path = "../storage/scratchpad", optional = true }
 storage-interface = { path = "../storage/storage-interface" }
 thiserror = "1.0.24"
-vm-genesis = { path = "../language/tools/vm-genesis", optional = true }
+vm-genesis = { path = "../diem-move/vm-genesis", optional = true }
 
 [dev-dependencies]
 proptest = "1.0.0"
@@ -62,14 +63,14 @@ rand = { version = "0.8.3" }
 generate-key = { path = "../config/generate-key" }
 diemdb = { path = "../storage/diemdb", features = ["fuzzing"] }
 diem-genesis-tool = {path = "../config/management/genesis", features = ["testing"] }
-diem-client = { path = "../sdk/client" }
+diem-client = { path = "../crates/diem-client" }
 diem-mempool = { path = "../mempool", features = ["fuzzing"] }
 diem-proptest-helpers = { path = "../common/proptest-helpers" }
 diem-temppath = { path = "../common/temppath" }
 diem-types = { path = "../types", features = ["fuzzing"] }
 vm-validator = { path = "../vm-validator" }
-diem-framework-releases= { path = "../language/diem-framework/DPN/releases" }
-vm-genesis = { path = "../language/tools/vm-genesis" }
+diem-framework-releases= { path = "../diem-move/diem-framework/DPN/releases" }
+vm-genesis = { path = "../diem-move/vm-genesis" }
 executor = { path = "../execution/executor" }
 executor-types = { path = "../execution/executor-types" }
 scratchpad = { path = "../storage/scratchpad" }

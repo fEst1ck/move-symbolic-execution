@@ -24,10 +24,11 @@ pub struct ConsensusConfig {
     pub sync_only: bool,
     // how many times to wait for txns from mempool when propose
     pub mempool_poll_count: u64,
-    // global switch for the decoupling execution feature
-    // only when decoupled is true, the execution and committing will be pipelined in different phases
-    pub decoupled_execution: bool,
     pub channel_size: usize,
+    // TODO: delete unused field
+    #[serde(default)]
+    pub decoupled_execution: bool,
+    #[serde(default)]
     pub back_pressure_limit: u64,
 }
 
@@ -47,8 +48,8 @@ impl Default for ConsensusConfig {
             safety_rules: SafetyRulesConfig::default(),
             sync_only: false,
             mempool_poll_count: 1,
-            decoupled_execution: false, // by default, we turn of the decoupling execution feature
-            channel_size: 30,           // hard-coded
+            channel_size: 30, // hard-coded
+            decoupled_execution: false,
             back_pressure_limit: 10,
         }
     }

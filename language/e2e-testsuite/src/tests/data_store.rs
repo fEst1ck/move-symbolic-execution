@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use bytecode_verifier::verify_module;
-use compiler::Compiler;
 use diem_types::{
     transaction::{Module, SignedTransaction, Transaction, TransactionStatus},
     vm_status::KeptVMStatus,
@@ -11,6 +10,7 @@ use language_e2e_tests::{
     account::AccountData, compile::compile_script, current_function_name, executor::FakeExecutor,
 };
 use move_binary_format::CompiledModule;
+use move_ir_compiler::Compiler;
 
 #[test]
 fn move_from_across_blocks() {
@@ -242,7 +242,7 @@ fn add_module_txn(sender: &AccountData, seq_num: u64) -> (CompiledModule, Signed
         deps: diem_framework_releases::current_modules().iter().collect(),
     };
     let module = compiler
-        .into_compiled_module("file_name", module_code.as_str())
+        .into_compiled_module(module_code.as_str())
         .expect("Module compilation failed");
     let mut module_blob = vec![];
     module
@@ -277,7 +277,7 @@ fn add_resource_txn(
         sender.address(),
     );
 
-    let module = compile_script("file_name", &program, extra_deps);
+    let module = compile_script(&program, extra_deps);
     sender
         .account()
         .transaction()
@@ -303,7 +303,7 @@ fn remove_resource_txn(
         sender.address(),
     );
 
-    let module = compile_script("file_name", &program, extra_deps);
+    let module = compile_script(&program, extra_deps);
     sender
         .account()
         .transaction()
@@ -329,7 +329,7 @@ fn borrow_resource_txn(
         sender.address(),
     );
 
-    let module = compile_script("file_name", &program, extra_deps);
+    let module = compile_script(&program, extra_deps);
     sender
         .account()
         .transaction()
@@ -355,7 +355,7 @@ fn change_resource_txn(
         sender.address(),
     );
 
-    let module = compile_script("file_name", &program, extra_deps);
+    let module = compile_script(&program, extra_deps);
     sender
         .account()
         .transaction()

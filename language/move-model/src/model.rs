@@ -17,7 +17,7 @@
 use std::{
     any::{Any, TypeId},
     cell::RefCell,
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     ffi::OsStr,
     fmt::{self, Formatter},
     rc::Rc,
@@ -31,6 +31,7 @@ use codespan_reporting::{
 use itertools::Itertools;
 #[allow(unused_imports)]
 use log::{info, warn};
+use move_command_line_common::files::FileHash;
 use num::{BigUint, One, ToPrimitive};
 use serde::{Deserialize, Serialize};
 
@@ -54,7 +55,6 @@ use move_binary_format::{
 use move_core_types::{
     account_address::AccountAddress, identifier::Identifier, language_storage, value::MoveValue,
 };
-use move_symbol_pool::Symbol as MoveStringSymbol;
 
 use crate::{
     ast::{
@@ -141,6 +141,11 @@ impl Loc {
             }
         }
         Loc::new(loc.file_id(), Span::new(start, end))
+    }
+
+    /// Returns true if the other location is enclosed by this location.
+    pub fn is_enclosing(&self, other: &Loc) -> bool {
+        self.file_id == other.file_id && GlobalEnv::enclosing_span(self.span, other.span)
     }
 }
 
@@ -446,9 +451,9 @@ pub struct GlobalEnv {
     /// The comments are represented as map from ByteIndex into string, where the index is the
     /// start position of the associated language item in the source.
     doc_comments: BTreeMap<FileId, BTreeMap<ByteIndex, String>>,
-    /// A mapping from file names to associated FileId. Though this information is
+    /// A mapping from file hash to file name and associated FileId. Though this information is
     /// already in `source_files`, we can't get it out of there so need to book keep here.
-    file_name_map: BTreeMap<String, FileId>,
+    file_hash_map: BTreeMap<FileHash, (String, FileId)>,
     /// Bijective mapping between FileId and a plain int. FileId's are themselves wrappers around
     /// ints, but the inner representation is opaque and cannot be accessed. This is used so we
     /// can emit FileId's to generated code and read them back.
@@ -500,12 +505,13 @@ impl GlobalEnv {
     /// Creates a new environment.
     pub fn new() -> Self {
         let mut source_files = Files::new();
-        let mut file_name_map = BTreeMap::new();
+        let mut file_hash_map = BTreeMap::new();
         let mut file_id_to_idx = BTreeMap::new();
         let mut file_idx_to_id = BTreeMap::new();
         let mut fake_loc = |content: &str| {
             let file_id = source_files.add(content, content.to_string());
-            file_name_map.insert(content.to_string(), file_id);
+            let file_hash = FileHash::new(content);
+            file_hash_map.insert(file_hash, (content.to_string(), file_id));
             let file_idx = file_id_to_idx.len() as u16;
             file_id_to_idx.insert(file_id, file_idx);
             file_idx_to_id.insert(file_idx, file_id);
@@ -515,7 +521,7 @@ impl GlobalEnv {
             )
         };
         let unknown_loc = fake_loc("<unknown>");
-        let unknown_move_ir_loc = MoveIrLoc::new(MoveStringSymbol::from("<unknown>"), 0, 0);
+        let unknown_move_ir_loc = MoveIrLoc::new(FileHash::new("<unknown>"), 0, 0);
         let internal_loc = fake_loc("<internal>");
         GlobalEnv {
             source_files,
@@ -523,7 +529,7 @@ impl GlobalEnv {
             unknown_loc,
             unknown_move_ir_loc,
             internal_loc,
-            file_name_map,
+            file_hash_map,
             file_id_to_idx,
             file_idx_to_id,
             file_id_is_dep: BTreeSet::new(),
@@ -617,9 +623,16 @@ impl GlobalEnv {
     }
 
     /// Adds a source to this environment, returning a FileId for it.
-    pub fn add_source(&mut self, file_name: &str, source: &str, is_dep: bool) -> FileId {
+    pub fn add_source(
+        &mut self,
+        file_hash: FileHash,
+        file_name: &str,
+        source: &str,
+        is_dep: bool,
+    ) -> FileId {
         let file_id = self.source_files.add(file_name, source.to_string());
-        self.file_name_map.insert(file_name.to_string(), file_id);
+        self.file_hash_map
+            .insert(file_hash, (file_name.to_string(), file_id));
         let file_idx = self.file_id_to_idx.len() as u16;
         self.file_id_to_idx.insert(file_id, file_idx);
         self.file_idx_to_id.insert(file_idx, file_id);
@@ -729,10 +742,10 @@ impl GlobalEnv {
     /// TODO: move-lang should use FileId as well so we don't need this here. There is already
     /// a todo in their code to remove the current use of `&'static str` for file names in Loc.
     pub fn to_loc(&self, loc: &MoveIrLoc) -> Loc {
-        let file_id = self.get_file_id(loc.file()).unwrap_or_else(|| {
+        let file_id = self.get_file_id(loc.file_hash()).unwrap_or_else(|| {
             panic!(
                 "Unable to find source file '{}' in the environment",
-                loc.file()
+                loc.file_hash()
             )
         });
         Loc {
@@ -742,8 +755,8 @@ impl GlobalEnv {
     }
 
     /// Returns the file id for a file name, if defined.
-    pub fn get_file_id(&self, fname: MoveStringSymbol) -> Option<FileId> {
-        self.file_name_map.get(fname.as_str()).cloned()
+    pub fn get_file_id(&self, fhash: FileHash) -> Option<FileId> {
+        self.file_hash_map.get(&fhash).map(|(_, id)| id).cloned()
     }
 
     /// Maps a FileId to an index which can be mapped back to a FileId.
@@ -794,9 +807,9 @@ impl GlobalEnv {
 
     /// Return the source file names.
     pub fn get_source_file_names(&self) -> Vec<String> {
-        self.file_name_map
+        self.file_hash_map
             .iter()
-            .filter_map(|(k, _)| {
+            .filter_map(|(_, (k, _))| {
                 if k.eq("<internal>") || k.eq("<unknown>") {
                     None
                 } else {
@@ -808,7 +821,7 @@ impl GlobalEnv {
 
     // Gets the number of source files in this environment.
     pub fn get_file_count(&self) -> usize {
-        self.file_name_map.len()
+        self.file_hash_map.len()
     }
 
     /// Returns true if diagnostics have error severity or worse.
@@ -1062,6 +1075,7 @@ impl GlobalEnv {
             spec,
             called_funs: Default::default(),
             calling_funs: Default::default(),
+            transitive_closure_of_called_funs: Default::default(),
         }
     }
 
@@ -1213,7 +1227,17 @@ impl GlobalEnv {
         // to be a bottleneck.
         let module_env = self.get_enclosing_module(loc)?;
         for func_env in module_env.into_functions() {
-            if Self::enclosing_span(func_env.get_loc().span(), loc.span()) {
+            if Self::enclosing_span(func_env.get_loc().span(), loc.span())
+                || Self::enclosing_span(
+                    func_env
+                        .get_spec()
+                        .loc
+                        .clone()
+                        .unwrap_or_else(|| self.unknown_loc.clone())
+                        .span(),
+                    loc.span(),
+                )
+            {
                 return Some(func_env.clone());
             }
         }
@@ -1571,7 +1595,7 @@ impl ModuleData {
             spec_vars: BTreeMap::new(),
             spec_funs: BTreeMap::new(),
             module_spec: Spec::default(),
-            source_map: SourceMap::new(None),
+            source_map: SourceMap::new(MoveIrLoc::new(FileHash::empty(), 0, 0), None),
             loc: Loc::default(),
             spec_block_infos: vec![],
             used_modules: Default::default(),
@@ -2696,6 +2720,9 @@ pub struct FunctionData {
 
     /// A cache for the calling functions.
     calling_funs: RefCell<Option<BTreeSet<QualifiedId<FunId>>>>,
+
+    /// A cache for the transitive closure of the called functions.
+    transitive_closure_of_called_funs: RefCell<Option<BTreeSet<QualifiedId<FunId>>>>,
 }
 
 impl FunctionData {
@@ -2714,6 +2741,7 @@ impl FunctionData {
             spec: Spec::default(),
             called_funs: Default::default(),
             calling_funs: Default::default(),
+            transitive_closure_of_called_funs: Default::default(),
         }
     }
 }
@@ -3070,6 +3098,13 @@ impl<'env> FunctionEnv<'env> {
         idx < self.get_parameter_count()
     }
 
+    /// Return true if this is a named parameter of this function.
+    pub fn is_named_parameter(&self, name: &str) -> bool {
+        self.get_parameters()
+            .iter()
+            .any(|p| self.symbol_pool().string(p.0).as_ref() == name)
+    }
+
     /// Returns the parameter types associated with this function
     pub fn get_parameter_types(&self) -> Vec<Type> {
         let view = self.definition_view();
@@ -3306,6 +3341,34 @@ impl<'env> FunctionEnv<'env> {
             .collect();
         *self.data.called_funs.borrow_mut() = Some(called.clone());
         called
+    }
+
+    /// Get the transitive closure of the called functions
+    pub fn get_transitive_closure_of_called_functions(&self) -> BTreeSet<QualifiedId<FunId>> {
+        if let Some(trans_called) = &*self.data.transitive_closure_of_called_funs.borrow() {
+            return trans_called.clone();
+        }
+
+        let mut set = BTreeSet::new();
+        let mut reachable_funcs = VecDeque::new();
+        reachable_funcs.push_back(self.clone());
+
+        // BFS in reachable_funcs to collect all reachable functions
+        while !reachable_funcs.is_empty() {
+            let current_fnc = reachable_funcs.pop_front();
+            if let Some(fnc) = current_fnc {
+                for callee in fnc.get_called_functions() {
+                    let f = self.module_env.env.get_function(callee);
+                    let qualified_id = f.get_qualified_id();
+                    if !set.contains(&qualified_id) {
+                        set.insert(qualified_id);
+                        reachable_funcs.push_back(f.clone());
+                    }
+                }
+            }
+        }
+        *self.data.transitive_closure_of_called_funs.borrow_mut() = Some(set.clone());
+        set
     }
 
     /// Returns the function name excluding the address and the module name

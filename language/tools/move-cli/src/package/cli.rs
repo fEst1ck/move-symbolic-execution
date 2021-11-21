@@ -6,25 +6,65 @@ use std::{
     fmt::Display,
     fs::{create_dir_all, read_to_string},
     io::Write,
+    os::unix::prelude::ExitStatusExt,
     path::{Path, PathBuf},
+    process::ExitStatus,
     time::Instant,
 };
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use codespan_reporting::term::termcolor::{ColorChoice, StandardStream};
 
+use disassembler::disassembler::Disassembler;
+use move_command_line_common::files::{FileHash, MOVE_COVERAGE_MAP_EXTENSION};
+use move_coverage::{
+    coverage_map::{output_map_to_file, CoverageMap},
+    format_csv_summary, format_human_summary,
+    source_coverage::SourceCoverageBuilder,
+    summary::summarize_inst_cov,
+};
 use move_lang::{
-    compiled_unit::CompiledUnit,
+    compiled_unit::{CompiledUnit, NamedCompiledModule},
     diagnostics::{self, codes::Severity},
     unit_test::{plan_builder::construct_test_plan, TestPlan},
     PASS_CFGIR,
 };
 use move_package::{
-    compilation::build_plan::BuildPlan, source_package::layout::SourcePackageLayout,
+    compilation::{build_plan::BuildPlan, compiled_package::CompiledUnitWithSource},
+    source_package::layout::SourcePackageLayout,
+    ModelConfig,
 };
 use move_prover::run_move_prover_with_model;
 use move_unit_test::UnitTestingConfig;
 use structopt::StructOpt;
+
+use crate::NativeFunctionRecord;
+
+#[derive(StructOpt)]
+pub enum CoverageSummaryOptions {
+    #[structopt(name = "summary")]
+    Summary {
+        /// Whether function coverage summaries should be displayed
+        #[structopt(long = "summarize-functions")]
+        functions: bool,
+        /// Output CSV data of coverage
+        #[structopt(long = "csv")]
+        output_csv: bool,
+        /// Whether path coverage should be derived (default is instruction coverage)
+        #[structopt(long = "derive-path-coverage")]
+        derive_path_coverage: bool,
+    },
+    #[structopt(name = "source")]
+    Source {
+        #[structopt(long = "module")]
+        module_name: String,
+    },
+    #[structopt(name = "bytecode")]
+    Bytecode {
+        #[structopt(long = "module")]
+        module_name: String,
+    },
+}
 
 #[derive(StructOpt)]
 pub enum PackageCommand {
@@ -55,6 +95,11 @@ pub enum PackageCommand {
     Prove {
         #[structopt(subcommand)]
         cmd: Option<ProverOptions>,
+    },
+    #[structopt(name = "coverage")]
+    CoverageReport {
+        #[structopt(subcommand)]
+        options: CoverageSummaryOptions,
     },
     #[structopt(name = "test")]
     UnitTest {
@@ -98,6 +143,22 @@ pub enum PackageCommand {
         /// Verbose mode
         #[structopt(long = "verbose")]
         verbose_mode: bool,
+
+        #[structopt(long = "coverage")]
+        compute_coverage: bool,
+    },
+
+    #[structopt(name = "disassemble")]
+    BytecodeView {
+        /// If set will start a disassembled bytecode-to-source explorer
+        #[structopt(long = "interactive")]
+        interactive: bool,
+        /// The package name. If not provided defaults to current package modules only
+        #[structopt(long = "package")]
+        package_name: Option<String>,
+        /// The name of the module or script in the package to disassemble
+        #[structopt(long = "name")]
+        module_or_script_name: String,
     },
 }
 
@@ -108,18 +169,144 @@ pub enum ProverOptions {
     Options(Vec<String>),
 }
 
+/// Encapsulates the possible returned states when running unit tests on a move package.
+#[derive(PartialEq)]
+pub enum UnitTestResult {
+    Success,
+    Failure,
+}
+
+impl From<UnitTestResult> for ExitStatus {
+    fn from(result: UnitTestResult) -> Self {
+        match result {
+            UnitTestResult::Success => ExitStatus::from_raw(0),
+            UnitTestResult::Failure => ExitStatus::from_raw(1),
+        }
+    }
+}
+
+impl CoverageSummaryOptions {
+    pub fn handle_command(&self, config: move_package::BuildConfig, path: &Path) -> Result<()> {
+        let coverage_map = CoverageMap::from_binary_file(path.join(".coverage_map.mvcov"));
+        let package = config.compile_package(path, &mut Vec::new())?;
+        let modules: Vec<_> = package
+            .modules()
+            .filter_map(|unit| match &unit.unit {
+                CompiledUnit::Module(NamedCompiledModule { module, .. }) => Some(module.clone()),
+                _ => None,
+            })
+            .collect();
+        match self {
+            CoverageSummaryOptions::Source { module_name } => {
+                let unit = package.get_module_by_name(module_name)?;
+                let source_path = &unit.source_path;
+                let (module, source_map) = match &unit.unit {
+                    CompiledUnit::Module(NamedCompiledModule {
+                        module, source_map, ..
+                    }) => (module, source_map),
+                    _ => panic!("Should all be modules"),
+                };
+                let source_coverage = SourceCoverageBuilder::new(module, &coverage_map, source_map);
+                source_coverage
+                    .compute_source_coverage(source_path)
+                    .output_source_coverage(&mut std::io::stdout())
+                    .unwrap();
+            }
+            CoverageSummaryOptions::Summary {
+                functions,
+                output_csv,
+                ..
+            } => {
+                let coverage_map = coverage_map.to_unified_exec_map();
+                if *output_csv {
+                    format_csv_summary(
+                        modules.as_slice(),
+                        &coverage_map,
+                        summarize_inst_cov,
+                        &mut std::io::stdout(),
+                    )
+                } else {
+                    format_human_summary(
+                        modules.as_slice(),
+                        &coverage_map,
+                        summarize_inst_cov,
+                        &mut std::io::stdout(),
+                        *functions,
+                    )
+                }
+            }
+            CoverageSummaryOptions::Bytecode { module_name } => {
+                let unit = package.get_module_by_name(module_name)?;
+                let mut disassembler = Disassembler::from_unit(&unit.unit);
+                disassembler.add_coverage_map(coverage_map.to_unified_exec_map());
+                println!("{}", disassembler.disassemble()?);
+            }
+        }
+        Ok(())
+    }
+}
+
 pub fn handle_package_commands(
     path: &Option<PathBuf>,
-    mut config: move_package::BuildConfig,
+    config: move_package::BuildConfig,
     cmd: &PackageCommand,
+    natives: Vec<NativeFunctionRecord>,
 ) -> Result<()> {
     let path = path
         .as_ref()
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap());
+    let rooted_path = SourcePackageLayout::try_find_root(&path);
     match cmd {
         PackageCommand::Build => {
-            config.compile_package(&path, &mut std::io::stdout())?;
+            config.compile_package(&rooted_path?, &mut std::io::stdout())?;
+        }
+        PackageCommand::BytecodeView {
+            interactive,
+            package_name,
+            module_or_script_name,
+        } => {
+            let package = config.compile_package(&rooted_path?, &mut Vec::new())?;
+            let needle_package = match package_name {
+                Some(package_name) => {
+                    if package_name == package.compiled_package_info.package_name.as_str() {
+                        &package
+                    } else {
+                        package.get_dependency_by_name(package_name)?
+                    }
+                }
+                None => &package,
+            };
+            match needle_package
+                .get_module_by_name(module_or_script_name)
+                .ok()
+            {
+                None => bail!(
+                    "Unable to find module or script with name '{}' in package '{}'",
+                    module_or_script_name,
+                    needle_package.compiled_package_info.package_name
+                ),
+                Some(unit) => {
+                    if *interactive {
+                        match unit {
+                            CompiledUnitWithSource {
+                                unit:
+                                    CompiledUnit::Module(NamedCompiledModule {
+                                        module, source_map, ..
+                                    }),
+                                source_path,
+                            } => move_bytecode_viewer::start_viewer_in_memory(
+                                module.clone(),
+                                source_map.clone(),
+                                source_path,
+                            ),
+                            _ => bail!("Interactive disassembler not supported for scripts"),
+                        }
+                    } else {
+                        println!("{}", Disassembler::from_unit(&unit.unit).disassemble()?);
+                    }
+                }
+            }
         }
         PackageCommand::New { name } => {
             let creation_path = Path::new(&path).join(name);
@@ -132,10 +319,20 @@ pub fn handle_package_commands(
                     move_prover::cli::Options::create_from_args(options)?
                 }
             };
+            println!("Starting verification ...");
             let mut error_writer = StandardStream::stderr(ColorChoice::Auto);
             let now = Instant::now();
-            let model = config.move_model_for_package(&path)?;
+            let model = config.move_model_for_package(
+                &path,
+                ModelConfig {
+                    all_files_as_targets: false,
+                },
+            )?;
             run_move_prover_with_model(&model, &mut error_writer, options, Some(now))?;
+            println!(
+                "Verification successful in {:.3}s",
+                now.elapsed().as_secs_f64()
+            );
         }
         PackageCommand::ErrMapGen {
             error_prefix,
@@ -149,7 +346,12 @@ pub fn handle_package_commands(
                 .with_extension(move_command_line_common::files::MOVE_ERROR_DESC_EXTENSION)
                 .to_string_lossy()
                 .to_string();
-            let model = config.move_model_for_package(&path)?;
+            let model = config.move_model_for_package(
+                &path,
+                ModelConfig {
+                    all_files_as_targets: true,
+                },
+            )?;
             let mut errmap_gen = errmapgen::ErrmapGen::new(&model, &errmap_options);
             errmap_gen.gen();
             errmap_gen.save_result();
@@ -163,6 +365,7 @@ pub fn handle_package_commands(
             report_storage_on_error,
             check_stackless_vm,
             verbose_mode,
+            compute_coverage,
         } => {
             let unit_test_config = UnitTestingConfig {
                 instruction_execution_bound: *instruction_execution_bound,
@@ -175,85 +378,126 @@ pub fn handle_package_commands(
                 verbose: *verbose_mode,
                 ..UnitTestingConfig::default_with_bound(None)
             };
+            let result = run_move_unit_tests(
+                &rooted_path?,
+                config,
+                unit_test_config,
+                natives,
+                *compute_coverage,
+            )?;
 
-            let mut test_plan = None;
-            config.test_mode = true;
-            config.dev_mode = true;
-
-            let resolution_graph = config.resolution_graph_for_package(&path)?;
-            let dep_file_map: HashMap<_, _> = resolution_graph
-                .package_table
-                .iter()
-                .flat_map(|(_, rpkg)| {
-                    rpkg.get_sources(&resolution_graph.build_options)
-                        .unwrap()
-                        .iter()
-                        .map(|fname| (*fname, read_to_string(Path::new(fname.as_str())).unwrap()))
-                        .collect::<HashMap<_, _>>()
-                })
-                .collect();
-            let build_plan = BuildPlan::create(resolution_graph)?;
-            let pkg =
-                build_plan.compile_with_driver(&mut std::io::stdout(), |compiler, is_root| {
-                    if !is_root {
-                        compiler.build_and_report()
-                    } else {
-                        let (files, comments_and_compiler_res) =
-                            compiler.run::<PASS_CFGIR>().unwrap();
-                        let (_, compiler) = diagnostics::unwrap_or_report_diagnostics(
-                            &files,
-                            comments_and_compiler_res,
-                        );
-                        let (mut compiler, cfgir) = compiler.into_ast();
-                        let compilation_env = compiler.compilation_env();
-                        let built_test_plan = construct_test_plan(compilation_env, &cfgir);
-
-                        if let Err(diags) =
-                            compilation_env.check_diags_at_or_above_severity(Severity::Warning)
-                        {
-                            diagnostics::report_diagnostics(&files, diags);
-                        }
-
-                        let compilation_result = compiler.at_cfgir(cfgir).build();
-
-                        let (units, _) =
-                            diagnostics::unwrap_or_report_diagnostics(&files, compilation_result);
-
-                        test_plan = Some((built_test_plan, files.clone(), units.clone()));
-                        Ok((files, units))
-                    }
-                })?;
-
-            let (test_plan, mut files, units) = test_plan.unwrap();
-            files.extend(dep_file_map);
-            let mut test_plan = TestPlan::new(test_plan.unwrap(), files, units);
-            for pkg in pkg.transitive_dependencies() {
-                for module in &pkg.compiled_units {
-                    match module {
-                        CompiledUnit::Script(_) => (),
-                        CompiledUnit::Module(module) => {
-                            test_plan
-                                .module_info
-                                .insert(module.module.self_id(), module.clone());
-                        }
-                    }
-                }
-            }
-
-            // TODO: We only run with stdlib natives for now. Revisit once we have native support
-            // in packages.
-            if unit_test_config
-                .run_and_report_unit_tests(test_plan, None, std::io::stdout())
-                .unwrap()
-                .1
-            {
-                std::process::exit(0)
-            } else {
+            if let UnitTestResult::Failure = result {
                 std::process::exit(1)
             }
         }
+        PackageCommand::CoverageReport { options } => {
+            options.handle_command(config, &rooted_path?)?;
+        }
     };
     Ok(())
+}
+
+pub fn run_move_unit_tests(
+    pkg_path: &Path,
+    mut build_config: move_package::BuildConfig,
+    unit_test_config: UnitTestingConfig,
+    natives: Vec<NativeFunctionRecord>,
+    compute_coverage: bool,
+) -> Result<UnitTestResult> {
+    let mut test_plan = None;
+    build_config.test_mode = true;
+    build_config.dev_mode = true;
+
+    let resolution_graph = build_config.resolution_graph_for_package(pkg_path)?;
+    let dep_file_map: HashMap<_, _> = resolution_graph
+        .package_table
+        .iter()
+        .flat_map(|(_, rpkg)| {
+            rpkg.get_sources(&resolution_graph.build_options)
+                .unwrap()
+                .iter()
+                .map(|fname| {
+                    let contents = read_to_string(Path::new(fname.as_str())).unwrap();
+                    let fhash = FileHash::new(&contents);
+                    (fhash, (*fname, contents))
+                })
+                .collect::<HashMap<_, _>>()
+        })
+        .collect();
+    let build_plan = BuildPlan::create(resolution_graph)?;
+    let pkg = build_plan.compile_with_driver(&mut std::io::stdout(), |compiler, is_root| {
+        if !is_root {
+            compiler.build_and_report()
+        } else {
+            let (files, comments_and_compiler_res) = compiler.run::<PASS_CFGIR>().unwrap();
+            let (_, compiler) =
+                diagnostics::unwrap_or_report_diagnostics(&files, comments_and_compiler_res);
+            let (mut compiler, cfgir) = compiler.into_ast();
+            let compilation_env = compiler.compilation_env();
+            let built_test_plan = construct_test_plan(compilation_env, &cfgir);
+
+            if let Err(diags) = compilation_env.check_diags_at_or_above_severity(Severity::Warning)
+            {
+                diagnostics::report_diagnostics(&files, diags);
+            }
+
+            let compilation_result = compiler.at_cfgir(cfgir).build();
+
+            let (units, _) = diagnostics::unwrap_or_report_diagnostics(&files, compilation_result);
+
+            test_plan = Some((built_test_plan, files.clone(), units.clone()));
+            Ok((files, units))
+        }
+    })?;
+
+    let (test_plan, mut files, units) = test_plan.unwrap();
+    files.extend(dep_file_map);
+    let test_plan = test_plan.unwrap();
+    let no_tests = test_plan.is_empty();
+    let mut test_plan = TestPlan::new(test_plan, files, units);
+    for pkg in pkg.0.transitive_dependencies() {
+        for unit in &pkg.compiled_units {
+            match &unit.unit {
+                CompiledUnit::Script(_) => (),
+                CompiledUnit::Module(module) => {
+                    test_plan
+                        .module_info
+                        .insert(module.module.self_id(), module.clone());
+                }
+            }
+        }
+    }
+
+    let trace_path = pkg_path.join(".trace");
+    let coverage_map_path = pkg_path
+        .join(".coverage_map")
+        .with_extension(MOVE_COVERAGE_MAP_EXTENSION);
+    let cleanup_trace = || {
+        if compute_coverage && trace_path.exists() {
+            std::fs::remove_file(&trace_path).unwrap();
+        }
+    };
+
+    cleanup_trace();
+
+    if compute_coverage {
+        std::env::set_var("MOVE_VM_TRACE", &trace_path);
+    }
+
+    if !unit_test_config
+        .run_and_report_unit_tests(test_plan, Some(natives), std::io::stdout())
+        .unwrap()
+        .1
+    {
+        cleanup_trace();
+        return Ok(UnitTestResult::Failure);
+    }
+
+    if compute_coverage && !no_tests {
+        let coverage_map = CoverageMap::from_trace_file(trace_path);
+        output_map_to_file(&coverage_map_path, &coverage_map).unwrap();
+    }
+    Ok(UnitTestResult::Success)
 }
 
 pub fn create_move_package<S: AsRef<str> + Display>(name: S, creation_path: &Path) -> Result<()> {

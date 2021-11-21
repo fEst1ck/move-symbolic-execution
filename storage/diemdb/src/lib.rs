@@ -62,7 +62,9 @@ use diem_logger::prelude::*;
 use diem_types::{
     account_address::AccountAddress,
     account_state::AccountState,
-    account_state_blob::{default_protocol::AccountStateWithProof, AccountStateBlob},
+    account_state_blob::{
+        default_protocol::AccountStateWithProof, AccountStateBlob, AccountStatesChunkWithProof,
+    },
     contract_event::{
         default_protocol::{EventByVersionWithProof, EventWithProof},
         ContractEvent,
@@ -101,7 +103,9 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
-use storage_interface::{DbReader, DbWriter, MoveDbReader, Order, StartupInfo, TreeState};
+use storage_interface::{
+    DbReader, DbWriter, MoveDbReader, Order, StartupInfo, StateSnapshotReceiver, TreeState,
+};
 
 const MAX_LIMIT: u64 = 1000;
 
@@ -224,6 +228,7 @@ pub struct DiemDB {
     system_store: SystemStore,
     rocksdb_property_reporter: RocksdbPropertyReporter,
     pruner: Option<Pruner>,
+    prune_window: Option<u64>,
 }
 
 impl DiemDB {
@@ -259,6 +264,7 @@ impl DiemDB {
             system_store: SystemStore::new(Arc::clone(&db)),
             rocksdb_property_reporter: RocksdbPropertyReporter::new(Arc::clone(&db)),
             pruner: prune_window.map(|n| Pruner::new(Arc::clone(&db), n)),
+            prune_window,
         }
     }
 
@@ -456,7 +462,14 @@ impl DiemDB {
 
     /// Creates new physical DB checkpoint in directory specified by `path`.
     pub fn create_checkpoint<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        self.db.create_checkpoint(path)
+        let start = Instant::now();
+        self.db.create_checkpoint(&path).map(|_| {
+            info!(
+                path = path.as_ref(),
+                time_ms = %start.elapsed().as_millis(),
+                "Made DiemDB checkpoint."
+            );
+        })
     }
 
     // ================================== Private APIs ==================================
@@ -792,6 +805,16 @@ impl DbReader<DpnProto> for DiemDB {
                 proof,
             ))
         })
+    }
+
+    /// Get the first version that txn starts existent.
+    fn get_first_txn_version(&self) -> Result<Option<Version>> {
+        self.transaction_store.get_first_txn_version()
+    }
+
+    /// Get the first version that write set starts existent.
+    fn get_first_write_set_version(&self) -> Result<Option<Version>> {
+        self.transaction_store.get_first_write_set_version()
     }
 
     /// Gets a batch of transactions for the purpose of synchronizing state to another node.
@@ -1160,6 +1183,35 @@ impl DbReader<DpnProto> for DiemDB {
                 .get_consistency_proof(client_known_version, ledger_version)
         })
     }
+
+    fn get_account_count(&self, version: Version) -> Result<usize> {
+        gauged_api("get_account_count", || {
+            self.state_store
+                .get_account_count(version)
+                .and_then(|count| {
+                    count.ok_or_else(|| {
+                        DiemDbError::NotFound(format!("Account count at version {}", version))
+                            .into()
+                    })
+                })
+        })
+    }
+
+    fn get_account_chunk_with_proof(
+        &self,
+        version: Version,
+        first_index: usize,
+        chunk_size: usize,
+    ) -> Result<AccountStatesChunkWithProof> {
+        gauged_api("get_account_chunk_with_proof", || {
+            self.state_store
+                .get_account_chunk_with_proof(version, first_index, chunk_size)
+        })
+    }
+
+    fn get_state_prune_window(&self) -> Option<usize> {
+        self.prune_window.map(|u| u as usize)
+    }
 }
 
 impl ModuleResolver for DiemDB {
@@ -1285,6 +1337,17 @@ impl DbWriter<DpnProto> for DiemDB {
             }
 
             Ok(())
+        })
+    }
+
+    fn get_state_snapshot_receiver(
+        &self,
+        version: Version,
+        expected_root_hash: HashValue,
+    ) -> Result<Box<dyn StateSnapshotReceiver<AccountStateBlob>>> {
+        gauged_api("get_state_snapshot_receiver", || {
+            self.state_store
+                .get_snapshot_receiver(version, expected_root_hash)
         })
     }
 }

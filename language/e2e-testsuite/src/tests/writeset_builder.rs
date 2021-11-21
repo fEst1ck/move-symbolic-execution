@@ -1,6 +1,5 @@
 // Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
-use compiler::Compiler;
 use diem_types::{
     access_path::AccessPath,
     on_chain_config::DiemVersion,
@@ -13,6 +12,7 @@ use diem_writeset_generator::build_changeset;
 use language_e2e_tests::{
     account::Account, compile::compile_module, current_function_name, executor::FakeExecutor,
 };
+use move_ir_compiler::Compiler;
 
 #[test]
 fn build_upgrade_writeset() {
@@ -30,7 +30,7 @@ fn build_upgrade_writeset() {
         ",
     );
 
-    let module = compile_module("file_name", &program).0;
+    let module = compile_module(&program).0;
     let module_bytes = {
         let mut v = vec![];
         module.serialize(&mut v).unwrap();
@@ -52,7 +52,7 @@ fn build_upgrade_writeset() {
     let writeset_txn = genesis_account
         .transaction()
         .write_set(WriteSetPayload::Direct(change_set))
-        .sequence_number(1)
+        .sequence_number(0)
         .sign();
 
     let output = executor.execute_transaction(writeset_txn.clone());
@@ -83,15 +83,13 @@ main(lr_account: signer) {
         let compiler = Compiler {
             deps: vec![&module],
         };
-        compiler
-            .into_script_blob("file_name", code)
-            .expect("Failed to compile")
+        compiler.into_script_blob(code).expect("Failed to compile")
     };
 
     let txn = genesis_account
         .transaction()
         .script(Script::new(script_body, vec![], vec![]))
-        .sequence_number(2)
+        .sequence_number(1)
         .sign();
 
     let output = executor.execute_transaction(txn);

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::streaming_client::Epoch;
-use diem_data_client::DataClientResponse;
+use diem_data_client::{Response, ResponsePayload};
 use diem_types::{
     account_state_blob::AccountStatesChunkWithProof,
     ledger_info::LedgerInfoWithSignatures,
@@ -17,27 +17,23 @@ use std::fmt::{Debug, Formatter};
 pub type NotificationId = u64;
 
 /// A single data notification with an ID and data payload.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct DataNotification {
     pub notification_id: NotificationId,
     pub data_payload: DataPayload,
 }
 
-/// A single payload (e.g. chunk) of requested data.
-#[derive(Debug)]
+/// A single payload (e.g. chunk) of data delivered to a data listener.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug)]
 pub enum DataPayload {
     AccountStatesWithProof(AccountStatesChunkWithProof),
+    ContinuousTransactionOutputsWithProof(LedgerInfoWithSignatures, TransactionOutputListWithProof),
+    ContinuousTransactionsWithProof(LedgerInfoWithSignatures, TransactionListWithProof),
     EpochEndingLedgerInfos(Vec<LedgerInfoWithSignatures>),
+    EndOfStream,
     TransactionOutputsWithProof(TransactionOutputListWithProof),
     TransactionsWithProof(TransactionListWithProof),
-}
-
-/// A sent data notification that tracks the original client request and the
-/// client response forwarded along a stream. This is useful for re-fetching.
-#[derive(Clone, Debug)]
-pub struct SentDataNotification {
-    pub client_request: DataClientRequest,
-    pub client_response: DataClientResponse,
 }
 
 /// A request that has been sent to the Diem data client.
@@ -45,8 +41,22 @@ pub struct SentDataNotification {
 pub enum DataClientRequest {
     AccountsWithProof(AccountsWithProofRequest),
     EpochEndingLedgerInfos(EpochEndingLedgerInfosRequest),
+    NumberOfAccounts(NumberOfAccountsRequest),
     TransactionsWithProof(TransactionsWithProofRequest),
     TransactionOutputsWithProof(TransactionOutputsWithProofRequest),
+}
+
+impl DataClientRequest {
+    /// Returns a summary label for the request
+    pub fn get_label(&self) -> &'static str {
+        match self {
+            Self::AccountsWithProof(_) => "accounts_with_proof",
+            Self::EpochEndingLedgerInfos(_) => "epoch_ending_ledger_infos",
+            Self::NumberOfAccounts(_) => "number_of_accounts",
+            Self::TransactionsWithProof(_) => "transactions_with_proof",
+            Self::TransactionOutputsWithProof(_) => "transaction_outputs_with_proof",
+        }
+    }
 }
 
 /// A request for fetching account states.
@@ -62,6 +72,12 @@ pub struct AccountsWithProofRequest {
 pub struct EpochEndingLedgerInfosRequest {
     pub start_epoch: Epoch,
     pub end_epoch: Epoch,
+}
+
+/// A client request for fetching the number of accounts at a version.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NumberOfAccountsRequest {
+    pub version: Version,
 }
 
 /// A client request for fetching transactions with proofs.
@@ -85,7 +101,7 @@ pub struct TransactionOutputsWithProofRequest {
 /// network and will be available in `client_response` when received.
 pub struct PendingClientResponse {
     pub client_request: DataClientRequest,
-    pub client_response: Option<Result<DataClientResponse, diem_data_client::Error>>,
+    pub client_response: Option<Result<Response<ResponsePayload>, diem_data_client::Error>>,
 }
 
 impl Debug for PendingClientResponse {

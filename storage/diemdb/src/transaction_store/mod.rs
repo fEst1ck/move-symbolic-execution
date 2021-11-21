@@ -116,6 +116,13 @@ impl TransactionStore {
         })
     }
 
+    /// Get the first version that txn starts existent.
+    pub fn get_first_txn_version(&self) -> Result<Option<Version>> {
+        let mut iter = self.db.iter::<TransactionSchema>(Default::default())?;
+        iter.seek_to_first();
+        iter.next().map(|res| res.map(|(v, _)| v)).transpose()
+    }
+
     /// Returns the block metadata carried on the block metadata transaction at or preceding
     /// `version`, together with the version of the block metadata transaction.
     /// Returns None if there's no such transaction at or preceding `version` (it's likely the genesis
@@ -166,6 +173,13 @@ impl TransactionStore {
         self.db
             .get::<WriteSetSchema>(&version)?
             .ok_or_else(|| DiemDbError::NotFound(format!("WriteSet at version {}", version)).into())
+    }
+
+    /// Get the first version that write set starts existent.
+    pub fn get_first_write_set_version(&self) -> Result<Option<Version>> {
+        let mut iter = self.db.iter::<WriteSetSchema>(Default::default())?;
+        iter.seek_to_first();
+        iter.next().map(|res| res.map(|(v, _)| v)).transpose()
     }
 
     /// Save executed transaction vm output given `version`

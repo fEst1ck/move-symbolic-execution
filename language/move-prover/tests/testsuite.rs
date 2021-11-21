@@ -1,41 +1,32 @@
 // Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use std::path::{Path, PathBuf};
-
-use codespan_reporting::term::termcolor::Buffer;
+use std::{
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use anyhow::anyhow;
-use itertools::Itertools;
-use move_command_line_common::{env::read_env_var, testing::EXP_EXT};
-use move_prover::{cli::Options, run_move_prover};
-use move_prover_test_utils::{baseline_test::verify_or_update_baseline, extract_test_directives};
-use tempfile::TempDir;
-
+use codespan_reporting::term::termcolor::Buffer;
 use datatest_stable::Requirements;
-#[allow(unused_imports)]
-use log::{debug, info, warn};
-use std::sync::atomic::{AtomicBool, Ordering};
+use itertools::Itertools;
+use log::{info, warn};
+use once_cell::sync::OnceCell;
+use tempfile::TempDir;
 use walkdir::WalkDir;
 
-use once_cell::sync::OnceCell;
+use move_command_line_common::{
+    env::{read_bool_env_var, read_env_var},
+    testing::EXP_EXT,
+};
+use move_prover::{cli::Options, run_move_prover};
+use move_prover_test_utils::{baseline_test::verify_or_update_baseline, extract_test_directives};
 
 const ENV_FLAGS: &str = "MVP_TEST_FLAGS";
 const ENV_TEST_EXTENDED: &str = "MVP_TEST_X";
 const ENV_TEST_INCONSISTENCY: &str = "MVP_TEST_INCONSISTENCY";
 const ENV_TEST_FEATURE: &str = "MVP_TEST_FEATURE";
 const ENV_TEST_ON_CI: &str = "MVP_TEST_ON_CI";
-const INCONSISTENCY_TEST_FLAGS: &[&str] = &[
-    "--dependency=../move-stdlib/sources",
-    "--dependency=../diem-framework/core/sources",
-    "--dependency=../diem-framework/experimental/sources",
-    "--check-inconsistency",
-];
-const REGULAR_TEST_FLAGS: &[&str] = &[
-    "--dependency=../move-stdlib/sources",
-    "--dependency=../diem-framework/core/sources",
-    "--dependency=../diem-framework/experimental/sources",
-];
 
 static NOT_CONFIGURED_WARNED: AtomicBool = AtomicBool::new(false);
 
@@ -180,16 +171,11 @@ fn test_runner_for_feature(path: &Path, feature: &Feature) -> datatest_stable::R
         Err(err) => format!("Move prover returns: {}\n", err),
     };
     if baseline_valid {
+        diags += &String::from_utf8_lossy(&error_writer.into_inner()).to_string();
         if let Some(ref path) = baseline_path {
-            diags += &String::from_utf8_lossy(&error_writer.into_inner()).to_string();
             verify_or_update_baseline(path.as_path(), &diags)?
         } else if !diags.is_empty() {
-            return Err(anyhow!(
-                "Unexpected prover output (expected none): {}{}",
-                diags,
-                String::from_utf8_lossy(&error_writer.into_inner())
-            )
-            .into());
+            return Err(anyhow!("Unexpected prover output (expected none): {}", diags).into());
         }
     }
 
@@ -205,21 +191,33 @@ fn get_flags_and_baseline(
     // Determine the way how to configure tests based on directory of the path.
     let path_str = path.to_string_lossy();
 
-    let stdlib_test_flags = if read_env_var(ENV_TEST_INCONSISTENCY).is_empty() {
-        REGULAR_TEST_FLAGS
+    let mut dep_flags = vec![
+        // stdlib is commonly required
+        "--dependency=../move-stdlib/sources",
+    ];
+    if path_str.contains("/move-stdlib/") {
+        // stdlib depends on nothing else
+    } else if path_str.contains("/diem-framework/core/") {
+        dep_flags.push("--dependency=../../diem-move/diem-framework/core/sources");
+    } else if path_str.contains("/diem-framework/DPN/") {
+        dep_flags.push("--dependency=../../diem-move/diem-framework/core/sources");
+        dep_flags.push("--dependency=../../diem-move/diem-framework/DPN/sources");
+    } else if path_str.contains("/diem-framework/experimental/") {
+        dep_flags.push("--dependency=../../diem-move/diem-framework/experimental/sources");
     } else {
-        INCONSISTENCY_TEST_FLAGS
-    };
+        // unit tests also depends on diem-framework core
+        dep_flags.push("--dependency=../../diem-move/diem-framework/core/sources");
+    }
 
     let (base_flags, baseline_path) =
         if path_str.contains("diem-framework/") || path_str.contains("move-stdlib/") {
-            (stdlib_test_flags, None)
+            (dep_flags, None)
         } else {
             let feature_name = feature.name.to_string();
             let separate_baseline = feature.separate_baseline
                 || extract_test_directives(path, "// separate_baseline: ")?.contains(&feature_name);
             (
-                REGULAR_TEST_FLAGS,
+                dep_flags,
                 Some(path.with_extension(if separate_baseline {
                     format!("{}_exp", feature.name)
                 } else {
@@ -228,6 +226,11 @@ fn get_flags_and_baseline(
             )
         };
     let mut flags = base_flags.iter().map(|s| (*s).to_string()).collect_vec();
+
+    // Add inconsistency checking flags
+    if read_bool_env_var(ENV_TEST_INCONSISTENCY) {
+        flags.push("--check-inconsistency".to_string());
+    }
 
     // Add flags specific to the feature.
     flags.extend(feature.flags.iter().map(|f| f.to_string()));
@@ -255,11 +258,29 @@ fn get_flags_and_baseline(
 fn collect_enabled_tests(reqs: &mut Vec<Requirements>, group: &str, feature: &Feature, path: &str) {
     let mut p = PathBuf::new();
     p.push(path);
-    for entry in WalkDir::new(p.clone()).min_depth(1).into_iter().flatten() {
+    for entry in WalkDir::new(p.clone())
+        .follow_links(false)
+        .min_depth(1)
+        .into_iter()
+        .flatten()
+    {
         if !entry.file_name().to_string_lossy().ends_with(".move") {
             continue;
         }
+
+        // TODO: this is to handle the awkwardness in the experimental folder in diem-framework
+        // where many symlinks are introduced. To be honest, both introducing symlinks (instead of
+        // using packages) and the hack here are bad designs. Hopefully this can be revisited soon.
         let path = entry.path();
+        if path
+            .symlink_metadata()
+            .expect("metadata")
+            .file_type()
+            .is_symlink()
+        {
+            continue;
+        }
+
         let mut included = match feature.inclusion_mode {
             InclusionMode::Implicit => !extract_test_directives(path, "// exclude_for: ")
                 .unwrap_or_default()
@@ -309,8 +330,25 @@ fn main() {
             collect_enabled_tests(&mut reqs, "extended", feature, "tests/xsources");
         } else {
             collect_enabled_tests(&mut reqs, "unit", feature, "tests/sources");
-            collect_enabled_tests(&mut reqs, "stdlib", feature, "../move-stdlib");
-            collect_enabled_tests(&mut reqs, "diem", feature, "../diem-framework");
+            collect_enabled_tests(&mut reqs, "stdlib", feature, "../move-stdlib/sources");
+            collect_enabled_tests(
+                &mut reqs,
+                "diem_core",
+                feature,
+                "../../diem-move/diem-framework/core/sources",
+            );
+            collect_enabled_tests(
+                &mut reqs,
+                "diem_dpn",
+                feature,
+                "../../diem-move/diem-framework/DPN/sources",
+            );
+            // collect_enabled_tests(
+            //     &mut reqs,
+            //     "diem_exp",
+            //     feature,
+            //     "../../diem-move/diem-framework/experimental/sources",
+            // );
         }
     }
     datatest_stable::runner(&reqs);

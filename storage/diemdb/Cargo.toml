@@ -25,7 +25,7 @@ thiserror = "1.0.24"
 accumulator = { path = "../accumulator" }
 bcs = "0.1.2"
 diem-config = { path = "../../config" }
-diem-crypto = { path = "../../crypto/crypto" }
+diem-crypto = { path = "../../crates/diem-crypto" }
 diem-jellyfish-merkle = { path = "../jellyfish-merkle" }
 diem-logger = { path = "../../common/logger" }
 diem-metrics = { path = "../../common/metrics" }
@@ -49,8 +49,9 @@ diem-jellyfish-merkle = { path = "../jellyfish-merkle", features = ["fuzzing"] }
 diem-proptest-helpers = { path = "../../common/proptest-helpers" }
 diem-temppath = { path = "../../common/temppath" }
 diem-types = { path = "../../types", features = ["fuzzing"] }
+schemadb = { path = "../schemadb", features = ["fuzzing"] }
 
 [features]
 default = []
 diemsum = []
-fuzzing = ["proptest", "proptest-derive", "diem-proptest-helpers", "diem-temppath", "diem-crypto/fuzzing", "diem-jellyfish-merkle/fuzzing", "diem-types/fuzzing"]
+fuzzing = ["proptest", "proptest-derive", "diem-proptest-helpers", "diem-temppath", "diem-crypto/fuzzing", "diem-jellyfish-merkle/fuzzing", "diem-types/fuzzing", "schemadb/fuzzing"]

@@ -3,42 +3,33 @@
 //
 // This file is generated on new project creation.
 
-// deno-lint-ignore-file no-explicit-any
 import {
   assert,
   assertEquals,
-  fail,
 } from "https://deno.land/std@0.85.0/testing/asserts.ts";
-import * as DiemHelpers from "../main/helpers.ts";
+import * as devapi from "../main/devapi.ts";
 import * as main from "../main/mod.ts";
-import * as Shuffle from "../repl.ts";
 
-Shuffle.test("Test Assert", () => {
+Deno.test("Test Assert", () => {
   assert("Hello");
 });
 
-Shuffle.test("Ability to set message", async () => {
-  const sender = Shuffle.senderAddress;
-  console.log("Test sender address: " + sender);
-  const receiver = Shuffle.receiverAddress;
-  console.log("Test receiver address: " + receiver);
-  await main.setMessageScriptFunction(
-    "hello blockchain",
-    (await Shuffle.sequenceNumber())!.valueOf(),
-  );
+Deno.test("Ability to set message", async () => {
+  let txn = await main.setMessageScriptFunction("hello blockchain");
+  txn = await devapi.waitForTransactionCompletion(txn.hash);
+  assert(txn.success);
 
-  for (let i = 0; i < 10; i++) {
-    const resources = await Shuffle.resources(sender);
-    const messageResource = main.resourcesWithName(resources, "MessageHolder")[0];
-    if (messageResource !== undefined) {
-      const result = DiemHelpers.hexToAscii(messageResource["value"]["message"])
-        .toString() === "\x00hello blockchain";
-      if (result) {
-        return;
-      }
-    }
-    await new Promise((r) => setTimeout(r, 1000));
-  }
+  const expected = "\x00hello blockchain"; // prefixed with \x00 bc of BCS encoding
+  const messages = await main.decodedMessages();
+  assertEquals(messages[0], expected);
+});
 
-  fail("Message was not set properly");
+Deno.test("Ability to set NFTs", async () => {
+  const contentUri = "https://placekitten.com/200/300";
+  let txn = await main.createTestNFTScriptFunction(contentUri);
+  txn = await devapi.waitForTransactionCompletion(txn.hash);
+  assert(txn.success);
+
+  const uris = await main.decodedNFTs();
+  assertEquals(uris[0], "\x00" + contentUri);
 });

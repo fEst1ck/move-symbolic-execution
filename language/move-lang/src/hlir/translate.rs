@@ -3,7 +3,7 @@
 
 use crate::{
     diag,
-    expansion::ast::{AbilitySet, Fields, ModuleIdent, Value_},
+    expansion::ast::{self as E, AbilitySet, Fields, ModuleIdent},
     hlir::ast::{self as H, Block},
     naming::ast as N,
     parser::ast::{BinOp_, ConstantName, Field, FunctionName, StructName, Var},
@@ -14,7 +14,10 @@ use crate::{
 use move_ir_types::location::*;
 use move_symbol_pool::Symbol;
 use once_cell::sync::Lazy;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    convert::TryInto,
+};
 
 //**************************************************************************************************
 // Vars
@@ -410,7 +413,7 @@ fn type_name(_context: &Context, sp!(loc, ntn_): N::TypeName) -> H::TypeName {
     let tn_ = match ntn_ {
         NT::Multiple(_) => panic!(
             "ICE type constraints failed {}:{}-{}",
-            loc.file(),
+            loc.file_hash(),
             loc.start(),
             loc.end()
         ),
@@ -433,7 +436,7 @@ fn base_type(context: &Context, sp!(loc, nb_): N::Type) -> H::BaseType {
     let b_ = match nb_ {
         NT::Var(_) => panic!(
             "ICE tvar not expanded: {}:{}-{}",
-            loc.file(),
+            loc.file_hash(),
             loc.start(),
             loc.end()
         ),
@@ -448,7 +451,7 @@ fn base_type(context: &Context, sp!(loc, nb_): N::Type) -> H::BaseType {
         NT::Ref(_, _) | NT::Unit => {
             panic!(
                 "ICE type constraints failed {}:{}-{}",
-                loc.file(),
+                loc.file_hash(),
                 loc.start(),
                 loc.end()
             )
@@ -882,14 +885,14 @@ fn exp_<'env>(
             TE::BinopExp(lhs, op, toperand_ty, rhs) => {
                 let operand_exp_ty_opt = match &op.value {
                     BinOp_::And if bind_for_short_circuit(&rhs) => {
-                        let tfalse_ = sp(loc, TE::Value(sp(loc, Value_::Bool(false))));
+                        let tfalse_ = sp(loc, TE::Value(sp(loc, E::Value_::Bool(false))));
                         let tfalse = Box::new(T::exp(N::Type_::bool(loc), tfalse_));
                         let if_else_ = sp(loc, TE::IfElse(lhs, rhs, tfalse));
                         let if_else = Box::new(T::exp(N::Type_::bool(ty.loc), if_else_));
                         return exp_loop(stack, result, cur_expected_type_opt, if_else);
                     }
                     BinOp_::Or if bind_for_short_circuit(&rhs) => {
-                        let ttrue_ = sp(loc, TE::Value(sp(loc, Value_::Bool(true))));
+                        let ttrue_ = sp(loc, TE::Value(sp(loc, E::Value_::Bool(true))));
                         let ttrue = Box::new(T::exp(N::Type_::bool(loc), ttrue_));
                         let if_else_ = sp(loc, TE::IfElse(lhs, ttrue, rhs));
                         let if_else = Box::new(T::exp(N::Type_::bool(ty.loc), if_else_));
@@ -918,7 +921,9 @@ fn exp_<'env>(
                 stack.frames.push(Box::new(f_rhs));
                 stack.frames.push(Box::new(f_lhs));
             }
-            TE::Builtin(bt, arguments) if matches!(&*bt, sp!(_, T::BuiltinFunction_::Assert)) => {
+            TE::Builtin(bt, arguments)
+                if matches!(&*bt, sp!(_, T::BuiltinFunction_::Assert(false))) =>
+            {
                 let tbool = N::Type_::bool(loc);
                 let tu64 = N::Type_::u64(loc);
                 let tunit = sp(loc, N::Type_::Unit);
@@ -954,6 +959,25 @@ fn exp_<'env>(
 
                 let block = T::exp(tunit, sp(loc, TE::Block(stmts)));
                 exp_loop(stack, result, cur_expected_type_opt, Box::new(block));
+            }
+            TE::Builtin(bt, arguments)
+                if matches!(&*bt, sp!(_, T::BuiltinFunction_::Assert(true))) =>
+            {
+                use T::ExpListItem as TI;
+                let tunit = sp(loc, N::Type_::Unit);
+                let [cond_item, code_item]: [TI; 2] = match arguments.exp.value {
+                    TE::ExpList(arg_list) => arg_list.try_into().unwrap(),
+                    _ => panic!("ICE type checking failed"),
+                };
+                let (econd, ecode) = match (cond_item, code_item) {
+                    (TI::Single(econd, _), TI::Single(ecode, _)) => (econd, ecode),
+                    _ => panic!("ICE type checking failed"),
+                };
+                let eabort = T::exp(tunit.clone(), sp(loc, TE::Abort(Box::new(ecode))));
+                let eunit = T::exp(tunit.clone(), sp(loc, TE::Unit { trailing: false }));
+                let if_else_ = TE::IfElse(Box::new(econd), Box::new(eunit), Box::new(eabort));
+                let if_else = T::exp(tunit, sp(loc, if_else_));
+                exp_loop(stack, result, cur_expected_type_opt, Box::new(if_else));
             }
             te_ => {
                 let result = &mut *result.borrow_mut();
@@ -1096,7 +1120,7 @@ fn exp_impl(
                 H::UnitCase::FromUser
             },
         },
-        TE::Value(v) => HE::Value(v),
+        TE::Value(ev) => HE::Value(value(context, ev)),
         TE::Constant(_m, c) => {
             // Currently only private constants exist
             HE::Constant(c)
@@ -1134,6 +1158,11 @@ fn exp_impl(
             HE::ModuleCall(Box::new(call))
         }
         TE::Builtin(bf, targ) => builtin(context, result, eloc, *bf, targ),
+        TE::Vector(vec_loc, n, tty, targ) => {
+            let ty = Box::new(base_type(context, *tty));
+            let arg = exp(context, result, None, *targ);
+            HE::Vector(vec_loc, n, ty, arg)
+        }
         TE::Dereference(te) => {
             let e = exp(context, result, None, *te);
             HE::Dereference(e)
@@ -1473,8 +1502,26 @@ fn builtin(
             let arg = exp(context, result, None, *targ);
             E::Freeze(arg)
         }
-        TB::Assert => unreachable!(),
+        TB::Assert(_) => unreachable!(),
     }
+}
+
+fn value(context: &mut Context, sp!(loc, ev_): E::Value) -> H::Value {
+    use E::Value_ as EV;
+    use H::Value_ as HV;
+    let v_ = match ev_ {
+        EV::InferredNum(_) => panic!("ICE should have been expanded"),
+        EV::Address(a) => HV::Address(a.into_addr_bytes(context.env.named_address_mapping())),
+        EV::U8(u) => HV::U8(u),
+        EV::U64(u) => HV::U64(u),
+        EV::U128(u) => HV::U128(u),
+        EV::Bool(u) => HV::Bool(u),
+        EV::Bytearray(bytes) => HV::Vector(
+            Box::new(H::BaseType_::u8(loc)),
+            bytes.into_iter().map(|b| sp(loc, HV::U8(b))).collect(),
+        ),
+    };
+    sp(loc, v_)
 }
 
 //**************************************************************************************************
@@ -1642,6 +1689,7 @@ fn bind_for_short_circuit(e: &T::Exp) -> bool {
         | TE::Assign(_, _, _)
         | TE::Mutate(_, _)
         | TE::Pack(_, _, _, _)
+        | TE::Vector(_, _, _, _)
         | TE::BorrowLocal(_, _)
         | TE::ExpList(_)
         | TE::Cast(_, _) => panic!("ICE unexpected exp in short circuit check: {:?}", e),

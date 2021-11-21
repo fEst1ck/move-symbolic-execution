@@ -3,7 +3,6 @@
 
 #![forbid(unsafe_code)]
 
-use compiler::Compiler;
 use diem_transaction_builder::stdlib::*;
 use diem_types::{
     account_address::AccountAddress,
@@ -16,6 +15,7 @@ use language_e2e_tests::{
     current_function_name,
     executor::FakeExecutor,
 };
+use move_ir_compiler::Compiler;
 
 fn assert_aborted_with(output: TransactionOutput, error_code: u64) {
     assert!(matches!(
@@ -44,9 +44,7 @@ fn encode_add_account_limits_admin_script(execute_as: AccountAddress) -> WriteSe
         let compiler = Compiler {
             deps: diem_framework_releases::current_modules().iter().collect(),
         };
-        compiler
-            .into_script_blob("file_name", code)
-            .expect("Failed to compile")
+        compiler.into_script_blob(code).expect("Failed to compile")
     };
 
     WriteSetPayload::Script {
@@ -89,9 +87,7 @@ fn encode_update_account_limit_definition_script(
         let compiler = Compiler {
             deps: diem_framework_releases::current_modules().iter().collect(),
         };
-        compiler
-            .into_script_blob("file_name", code)
-            .expect("Failed to compile")
+        compiler.into_script_blob(code).expect("Failed to compile")
     };
 
     Script::new(
@@ -134,9 +130,7 @@ fn encode_update_account_limit_window_info_script(
         let compiler = Compiler {
             deps: diem_framework_releases::current_modules().iter().collect(),
         };
-        compiler
-            .into_script_blob("file_name", code)
-            .expect("Failed to compile")
+        compiler.into_script_blob(code).expect("Failed to compile")
     };
 
     Script::new(
@@ -161,7 +155,7 @@ fn account_limits() {
     let diem_root = Account::new_diem_root();
     let blessed = Account::new_blessed_tc();
     let dd = Account::new_testing_dd();
-    let dr_sequence_number = 1;
+    let dr_sequence_number = 0;
     let tc_sequence_number = 0;
     let dd_sequence_number = 0;
 

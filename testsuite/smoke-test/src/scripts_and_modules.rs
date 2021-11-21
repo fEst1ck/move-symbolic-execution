@@ -11,17 +11,17 @@ use std::{
     process::Command,
 };
 
-use compiler::Compiler;
 use diem_sdk::{
     client::{views::AmountView, BlockingClient, WaitForTransactionError},
     transaction_builder::{Currency, TransactionFactory},
     types::{
         account_address::AccountAddress,
-        transaction::{Module, Script, TransactionArgument, TransactionPayload},
+        transaction::{ModuleBundle, Script, TransactionArgument, TransactionPayload},
         LocalAccount,
     },
 };
 use forge::{AdminContext, AdminTest, Result, Test};
+use move_ir_compiler::Compiler;
 
 pub struct MalformedScript;
 
@@ -35,7 +35,7 @@ impl AdminTest for MalformedScript {
     fn run<'t>(&self, ctx: &mut AdminContext<'t>) -> Result<()> {
         let client = ctx.client();
         let transaction_factory = ctx.chain_info().transaction_factory();
-        enable_custom_script(
+        enable_open_publishing(
             &client,
             &transaction_factory,
             &mut ctx.chain_info().root_account,
@@ -95,7 +95,7 @@ impl AdminTest for ExecuteCustomModuleAndScript {
     fn run<'t>(&self, ctx: &mut AdminContext<'t>) -> Result<()> {
         let client = ctx.client();
         let factory = ctx.chain_info().transaction_factory();
-        enable_custom_script(&client, &factory, &mut ctx.chain_info().root_account)?;
+        enable_open_publishing(&client, &factory, &mut ctx.chain_info().root_account)?;
 
         let mut account1 = ctx.random_account();
         ctx.chain_info()
@@ -144,9 +144,9 @@ impl AdminTest for ExecuteCustomModuleAndScript {
             ],
         )?;
 
-        let publish_txn = account1.sign_with_transaction_builder(
-            factory.payload(TransactionPayload::Module(Module::new(compiled_module))),
-        );
+        let publish_txn = account1.sign_with_transaction_builder(factory.payload(
+            TransactionPayload::ModuleBundle(ModuleBundle::singleton(compiled_module)),
+        ));
         client.submit(&publish_txn)?;
         client.wait_for_signed_transaction(&publish_txn, None, None)?;
 
@@ -219,7 +219,7 @@ fn copy_file_with_sender_address(file_path: &Path, sender: AccountAddress) -> io
     Ok(tmp_source_path)
 }
 
-pub(crate) fn enable_custom_script(
+pub fn enable_open_publishing(
     client: &BlockingClient,
     transaction_factory: &TransactionFactory,
     root_account: &mut LocalAccount,
@@ -239,9 +239,7 @@ pub(crate) fn enable_custom_script(
         let compiler = Compiler {
             deps: diem_framework_releases::current_modules().iter().collect(),
         };
-        compiler
-            .into_script_blob("file_name", code)
-            .expect("Failed to compile")
+        compiler.into_script_blob(code).expect("Failed to compile")
     };
 
     let txn = root_account.sign_with_transaction_builder(transaction_factory.payload(

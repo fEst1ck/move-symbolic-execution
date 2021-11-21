@@ -91,13 +91,14 @@ pub(crate) mod test_utils {
     };
     use diem_infallible::RwLock;
     use diem_types::{
+        move_resource::MoveStorage,
         on_chain_config::ON_CHAIN_CONFIG_REGISTRY,
         protocol_spec::DpnProto,
         transaction::{Transaction, WriteSetPayload},
     };
     use diem_vm::DiemVM;
     use diemdb::DiemDB;
-    use event_notifications::EventSubscriptionService;
+    use event_notifications::{EventNotificationSender, EventSubscriptionService};
     use executor::Executor;
     use executor_test_helpers::bootstrap_genesis;
     use futures::channel::mpsc;
@@ -107,14 +108,14 @@ pub(crate) mod test_utils {
         protocols::network::NewNetworkSender,
     };
     use std::{collections::HashMap, sync::Arc};
-    use storage_interface::DbReaderWriter;
+    use storage_interface::{DbReader, DbReaderWriter};
 
     #[cfg(test)]
     pub(crate) fn create_coordinator_with_config_and_waypoint(
         node_config: NodeConfig,
         waypoint: Waypoint,
     ) -> StateSyncCoordinator<ExecutorProxy, MempoolNotifier> {
-        create_state_sync_coordinator_for_tests(node_config, waypoint)
+        create_state_sync_coordinator_for_tests(node_config, waypoint, false)
     }
 
     pub(crate) fn create_validator_coordinator(
@@ -122,7 +123,7 @@ pub(crate) mod test_utils {
         let mut node_config = NodeConfig::default();
         node_config.base.role = RoleType::Validator;
 
-        create_state_sync_coordinator_for_tests(node_config, Waypoint::default())
+        create_state_sync_coordinator_for_tests(node_config, Waypoint::default(), false)
     }
 
     #[cfg(test)]
@@ -131,12 +132,22 @@ pub(crate) mod test_utils {
         let mut node_config = NodeConfig::default();
         node_config.base.role = RoleType::FullNode;
 
-        create_state_sync_coordinator_for_tests(node_config, Waypoint::default())
+        create_state_sync_coordinator_for_tests(node_config, Waypoint::default(), false)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn create_read_only_coordinator(
+    ) -> StateSyncCoordinator<ExecutorProxy, MempoolNotifier> {
+        let mut node_config = NodeConfig::default();
+        node_config.base.role = RoleType::Validator;
+
+        create_state_sync_coordinator_for_tests(node_config, Waypoint::default(), true)
     }
 
     fn create_state_sync_coordinator_for_tests(
         node_config: NodeConfig,
         waypoint: Waypoint,
+        read_only_mode: bool,
     ) -> StateSyncCoordinator<ExecutorProxy, MempoolNotifier> {
         // Generate a genesis change set
         let (genesis, _) = vm_genesis::test_genesis_change_set_and_validators(Some(1));
@@ -150,12 +161,20 @@ pub(crate) mod test_utils {
         let genesis_txn = Transaction::GenesisTransaction(WriteSetPayload::Direct(genesis));
         bootstrap_genesis::<DiemVM>(&db_rw, &genesis_txn).unwrap();
 
+        // Create the event subscription service and notify initial configs
+        let storage: Arc<dyn DbReader<DpnProto>> = db.clone();
+        let synced_version = (&*storage).fetch_synced_version().unwrap();
+        let mut event_subscription_service = EventSubscriptionService::new(
+            ON_CHAIN_CONFIG_REGISTRY,
+            Arc::new(RwLock::new(db_rw.clone())),
+        );
+        event_subscription_service
+            .notify_initial_configs(synced_version)
+            .unwrap();
+
         // Create executor proxy
-        let chunk_executor = Box::new(Executor::<DpnProto, DiemVM>::new(db_rw.clone()));
-        let event_subscription_service =
-            EventSubscriptionService::new(ON_CHAIN_CONFIG_REGISTRY, Arc::new(RwLock::new(db_rw)));
-        let mut executor_proxy = ExecutorProxy::new(db, chunk_executor, event_subscription_service);
-        executor_proxy.notify_initial_configs().unwrap();
+        let chunk_executor = Box::new(Executor::<DpnProto, DiemVM>::new(db_rw));
+        let executor_proxy = ExecutorProxy::new(db, chunk_executor, event_subscription_service);
 
         // Get initial state
         let initial_state = executor_proxy.get_local_storage_state().unwrap();
@@ -188,6 +207,7 @@ pub(crate) mod test_utils {
             waypoint,
             executor_proxy,
             initial_state,
+            read_only_mode,
         )
         .unwrap()
     }

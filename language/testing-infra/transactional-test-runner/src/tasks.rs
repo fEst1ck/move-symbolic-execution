@@ -20,7 +20,7 @@ use tempfile::NamedTempFile;
 #[derive(Debug)]
 pub enum RawAddress {
     Named(Identifier),
-    Literal(AccountAddress),
+    Anonymous(AccountAddress),
 }
 
 fn parse_address_literal(s: &str) -> Result<AccountAddress> {
@@ -33,7 +33,7 @@ fn parse_address_literal(s: &str) -> Result<AccountAddress> {
 impl RawAddress {
     pub fn parse(s: &str) -> Result<Self> {
         if let Ok(addr) = parse_address_literal(s) {
-            return Ok(Self::Literal(addr));
+            return Ok(Self::Anonymous(addr));
         }
         let name =
             Identifier::new(s).map_err(|_| anyhow!("Failed to parse \"{}\" as address.", s))?;
@@ -310,8 +310,7 @@ where
         });
 
         let app = app.subcommand(ViewCommand::clap().name("view"));
-
-        app
+        SubCommands::augment_clap(app)
     }
 
     fn from_clap(matches: &clap::ArgMatches<'_>) -> Self {
@@ -326,12 +325,7 @@ where
                 TaskCommand::Run(StructOpt::from_clap(matches), StructOpt::from_clap(matches))
             }
             ("view", Some(matches)) => TaskCommand::View(StructOpt::from_clap(matches)),
-            _ => {
-                panic!(
-                    "Failed to construct command from structopt matches. \
-                        There is likely something wrong with your clap::App definition."
-                )
-            }
+            _ => TaskCommand::Subcommand(SubCommands::from_clap(matches)),
         }
     }
 }

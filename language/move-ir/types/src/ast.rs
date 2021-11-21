@@ -50,6 +50,8 @@ pub enum ScriptOrModule {
 #[derive(Debug, Clone)]
 /// The Move transaction script to be executed
 pub struct Script {
+    /// The source location for this script
+    pub loc: Loc,
     /// The dependencies of `main`, i.e. of the transaction script
     pub imports: Vec<ImportDefinition>,
     /// Explicit declaration of dependencies. If not provided, will be inferred based on given
@@ -83,6 +85,8 @@ pub struct ModuleIdent {
 /// A Move module
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModuleDefinition {
+    /// The location of this module
+    pub loc: Loc,
     /// name and address of the module
     pub identifier: ModuleIdent,
     /// the module's friends
@@ -517,8 +521,6 @@ pub enum Statement {
     WhileStatement(While),
     /// `loop { s }`
     LoopStatement(Loop),
-    /// no-op that eases parsing in some places
-    EmptyStatement,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -758,12 +760,14 @@ impl Program {
 impl Script {
     /// Create a new `Script` from the imports and the main function
     pub fn new(
+        loc: Loc,
         imports: Vec<ImportDefinition>,
         explicit_dependency_declarations: Vec<ModuleDependency>,
         constants: Vec<Constant>,
         main: Function,
     ) -> Self {
         Script {
+            loc,
             imports,
             explicit_dependency_declarations,
             constants,
@@ -823,6 +827,7 @@ impl ModuleDefinition {
     /// and procedures
     /// Does not verify the correctness of any internal properties of its elements
     pub fn new(
+        loc: Loc,
         identifier: ModuleIdent,
         friends: Vec<ModuleIdent>,
         imports: Vec<ImportDefinition>,
@@ -833,6 +838,7 @@ impl ModuleDefinition {
         synthetics: Vec<SyntheticDefinition>,
     ) -> Self {
         ModuleDefinition {
+            loc,
             identifier,
             friends,
             imports,
@@ -1672,7 +1678,6 @@ impl fmt::Display for Statement {
             Statement::IfElseStatement(if_else) => write!(f, "{}", if_else),
             Statement::WhileStatement(while_) => write!(f, "{}", while_),
             Statement::LoopStatement(loop_) => write!(f, "{}", loop_),
-            Statement::EmptyStatement => write!(f, "<empty statement>"),
         }
     }
 }

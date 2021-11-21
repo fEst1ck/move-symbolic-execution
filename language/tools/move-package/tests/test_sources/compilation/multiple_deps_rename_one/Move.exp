@@ -26,5 +26,10 @@ CompiledPackageInfo {
         test_mode: false,
         generate_docs: false,
         generate_abis: false,
+        install_dir: Some(
+            "ELIDED_FOR_TEST",
+        ),
+        force_recompilation: false,
+        additional_named_addresses: {},
     },
 }

@@ -3,12 +3,7 @@
 
 use anyhow::{format_err, Error, Result};
 use diem_config::{
-    config::{
-        RoleType, StreamConfig, DEFAULT_BATCH_SIZE_LIMIT, DEFAULT_CONTENT_LENGTH_LIMIT,
-        DEFAULT_PAGE_SIZE_LIMIT, DEFAULT_STREAM_RPC_MAX_POLL_INTERVAL_MS,
-        DEFAULT_STREAM_RPC_POLL_INTERVAL_MS, DEFAULT_STREAM_RPC_SEND_QUEUE_SIZE,
-        DEFAULT_STREAM_RPC_SUBSCRIPTION_FETCH_SIZE,
-    },
+    config::{JsonRpcConfig, RoleType, StreamConfig},
     utils,
 };
 use diem_crypto::HashValue;
@@ -34,8 +29,7 @@ use diem_types::{
     state_proof::StateProof,
     transaction::{
         default_protocol::{
-            AccountTransactionsWithProof, TransactionListWithProof, TransactionOutputListWithProof,
-            TransactionWithProof,
+            AccountTransactionsWithProof, TransactionListWithProof, TransactionWithProof,
         },
         Transaction, TransactionInfo, TransactionInfoTrait, Version,
     },
@@ -62,7 +56,7 @@ use std::{
     net::SocketAddr,
     sync::Arc,
 };
-use storage_interface::{DbReader, MoveDbReader, Order, StartupInfo, TreeState};
+use storage_interface::{DbReader, MoveDbReader, Order};
 use tokio::runtime::Runtime;
 
 /// Creates JSON RPC server for a Validator node
@@ -73,25 +67,21 @@ pub fn test_bootstrap(
     diem_db: Arc<dyn MoveDbReader<DpnProto>>,
     mp_sender: MempoolClientSender,
 ) -> Runtime {
-    let mut stream_config: StreamConfig = StreamConfig {
+    let stream_rpc = StreamConfig {
         enabled: true,
-        subscription_fetch_size: DEFAULT_STREAM_RPC_SUBSCRIPTION_FETCH_SIZE,
-        send_queue_size: DEFAULT_STREAM_RPC_SEND_QUEUE_SIZE,
-        poll_interval_ms: DEFAULT_STREAM_RPC_POLL_INTERVAL_MS,
-        max_poll_interval_ms: DEFAULT_STREAM_RPC_MAX_POLL_INTERVAL_MS,
+        ..Default::default()
+    };
+    let cfg = JsonRpcConfig {
+        address,
+        stream_rpc,
+        ..Default::default()
     };
     crate::bootstrap(
-        address,
-        DEFAULT_BATCH_SIZE_LIMIT,
-        DEFAULT_PAGE_SIZE_LIMIT,
-        DEFAULT_CONTENT_LENGTH_LIMIT,
-        &None,
-        &None,
+        &cfg,
         diem_db,
         mp_sender,
         RoleType::Validator,
         ChainId::test(),
-        &stream_config,
     )
 }
 
@@ -269,33 +259,6 @@ impl DbReader<DpnProto> for MockDiemDB {
         })
     }
 
-    fn get_transaction_by_hash(
-        &self,
-        _hash: HashValue,
-        _ledger_version: Version,
-        _fetch_events: bool,
-    ) -> Result<Option<TransactionWithProof>> {
-        unimplemented!()
-    }
-
-    fn get_transaction_by_version(
-        &self,
-        _version: u64,
-        _ledger_version: Version,
-        _fetch_events: bool,
-    ) -> Result<TransactionWithProof> {
-        unimplemented!()
-    }
-
-    fn get_transaction_outputs(
-        &self,
-        _start_version: Version,
-        _limit: u64,
-        _ledger_version: Version,
-    ) -> Result<TransactionOutputListWithProof> {
-        unimplemented!()
-    }
-
     fn get_events(
         &self,
         key: &EventKey,
@@ -374,10 +337,6 @@ impl DbReader<DpnProto> for MockDiemDB {
             .clone())
     }
 
-    fn get_startup_info(&self) -> Result<Option<StartupInfo>> {
-        unimplemented!()
-    }
-
     fn get_account_state_with_proof_by_version(
         &self,
         address: AccountAddress,
@@ -390,26 +349,6 @@ impl DbReader<DpnProto> for MockDiemDB {
             self.get_latest_account_state(address)?,
             SparseMerkleProof::new(None, vec![]),
         ))
-    }
-
-    fn get_latest_state_root(&self) -> Result<(u64, HashValue)> {
-        unimplemented!()
-    }
-
-    fn get_latest_tree_state(&self) -> Result<TreeState> {
-        unimplemented!()
-    }
-
-    fn get_epoch_ending_ledger_infos(
-        &self,
-        _start_epoch: u64,
-        _end_epoch: u64,
-    ) -> Result<EpochChangeProof> {
-        unimplemented!()
-    }
-
-    fn get_epoch_ending_ledger_info(&self, _: u64) -> Result<LedgerInfoWithSignatures> {
-        unimplemented!()
     }
 
     fn get_block_timestamp(&self, version: u64) -> Result<u64> {

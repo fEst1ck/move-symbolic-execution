@@ -1,23 +1,40 @@
 // Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::shared;
-
+use crate::{shared, shared::Network};
 use anyhow::Result;
-use shared::get_shuffle_dir;
-use std::{collections::HashMap, path::Path, process::Command};
+use diem_types::account_address::AccountAddress;
+use std::{path::Path, process::Command};
 
 /// Launches a Deno REPL for the shuffle project, generating transaction
 /// builders and loading them into the REPL namespace for easy on chain interaction.
-pub fn handle(project_path: &Path, network: Option<String>) -> Result<()> {
-    let config = shared::read_config(project_path)?;
+pub fn handle(
+    home: &shared::Home,
+    project_path: &Path,
+    network: Network,
+    key_path: &Path,
+    sender_address: AccountAddress,
+) -> Result<()> {
     shared::generate_typescript_libraries(project_path)?;
     let deno_bootstrap = format!(
-        r#"import * as Shuffle from "{shuffle}";
+        r#"import * as context from "{context}";
+        import * as devapi from "{devapi}";
+        import * as helpers from "{helpers}";
         import * as main from "{main}";
         import * as codegen from "{codegen}";
-        import * as DiemHelpers from "{helpers}";"#,
-        shuffle = project_path.join("repl.ts").to_string_lossy(),
+        import * as help from "{repl_help}";"#,
+        context = project_path
+            .join(shared::MAIN_PKG_PATH)
+            .join("context.ts")
+            .to_string_lossy(),
+        devapi = project_path
+            .join(shared::MAIN_PKG_PATH)
+            .join("devapi.ts")
+            .to_string_lossy(),
+        helpers = project_path
+            .join(shared::MAIN_PKG_PATH)
+            .join("helpers.ts")
+            .to_string_lossy(),
         main = project_path
             .join(shared::MAIN_PKG_PATH)
             .join("mod.ts")
@@ -26,27 +43,13 @@ pub fn handle(project_path: &Path, network: Option<String>) -> Result<()> {
             .join(shared::MAIN_PKG_PATH)
             .join("generated/diemTypes/mod.ts")
             .to_string_lossy(),
-        helpers = project_path
+        repl_help = project_path
             .join(shared::MAIN_PKG_PATH)
-            .join("helpers.ts")
-            .to_string_lossy(),
+            .join("repl_help.ts")
+            .to_string_lossy()
     );
-    let mut filtered_envs: HashMap<String, String> = HashMap::new();
-    filtered_envs.insert(
-        String::from("PROJECT_PATH"),
-        project_path.to_string_lossy().to_string(),
-    );
-    filtered_envs.insert(
-        String::from("SHUFFLE_HOME"),
-        get_shuffle_dir().to_string_lossy().to_string(),
-    );
-    let shuffle_network = match network {
-        Some(network) => network,
-        None => config.get_network().to_string(),
-    };
-
-    filtered_envs.insert(String::from("SHUFFLE_NETWORK"), shuffle_network);
-
+    let filtered_envs =
+        shared::get_filtered_envs_for_deno(home, project_path, &network, key_path, sender_address)?;
     Command::new("deno")
         .args(["repl", "--unstable", "--eval", deno_bootstrap.as_str()])
         .envs(&filtered_envs)

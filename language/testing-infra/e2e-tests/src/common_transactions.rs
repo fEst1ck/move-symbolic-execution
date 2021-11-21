@@ -4,7 +4,6 @@
 //! Support for encoding transactions for common situations.
 
 use crate::account::Account;
-use compiler::Compiler;
 use diem_framework_releases::legacy::transaction_scripts::LegacyStdlibScript;
 use diem_transaction_builder::stdlib::encode_peer_to_peer_by_signers_script_function;
 use diem_types::{
@@ -14,6 +13,7 @@ use diem_types::{
     },
 };
 use move_core_types::language_storage::TypeTag;
+use move_ir_compiler::Compiler;
 use once_cell::sync::Lazy;
 
 pub static CREATE_ACCOUNT_SCRIPT: Lazy<Vec<u8>> = Lazy::new(|| {
@@ -51,9 +51,7 @@ pub static CREATE_ACCOUNT_SCRIPT: Lazy<Vec<u8>> = Lazy::new(|| {
     let compiler = Compiler {
         deps: diem_framework_releases::current_modules().iter().collect(),
     };
-    compiler
-        .into_script_blob("file_name", code)
-        .expect("Failed to compile")
+    compiler.into_script_blob(code).expect("Failed to compile")
 });
 
 pub static EMPTY_SCRIPT: Lazy<Vec<u8>> = Lazy::new(|| {
@@ -66,9 +64,7 @@ pub static EMPTY_SCRIPT: Lazy<Vec<u8>> = Lazy::new(|| {
     let compiler = Compiler {
         deps: diem_framework_releases::current_modules().iter().collect(),
     };
-    compiler
-        .into_script_blob("file_name", code)
-        .expect("Failed to compile")
+    compiler.into_script_blob(code).expect("Failed to compile")
 });
 
 pub static MULTI_AGENT_SWAP_SCRIPT: Lazy<Vec<u8>> = Lazy::new(|| {
@@ -107,9 +103,7 @@ pub static MULTI_AGENT_SWAP_SCRIPT: Lazy<Vec<u8>> = Lazy::new(|| {
     let compiler = Compiler {
         deps: diem_framework_releases::current_modules().iter().collect(),
     };
-    compiler
-        .into_script_blob("file_name", code)
-        .expect("Failed to compile")
+    compiler.into_script_blob(code).expect("Failed to compile")
 });
 
 pub static MULTI_AGENT_MINT_SCRIPT: Lazy<Vec<u8>> = Lazy::new(|| {
@@ -151,9 +145,7 @@ pub static MULTI_AGENT_MINT_SCRIPT: Lazy<Vec<u8>> = Lazy::new(|| {
     let compiler = Compiler {
         deps: diem_framework_releases::current_modules().iter().collect(),
     };
-    compiler
-        .into_script_blob("file_name", code)
-        .expect("Failed to compile")
+    compiler.into_script_blob(code).expect("Failed to compile")
 });
 
 pub fn empty_txn(

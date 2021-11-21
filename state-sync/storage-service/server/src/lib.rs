@@ -3,13 +3,22 @@
 
 #![forbid(unsafe_code)]
 
+mod logging;
+mod metrics;
 pub mod network;
 
 #[cfg(test)]
 mod tests;
 
-use crate::network::StorageServiceNetworkEvents;
+use crate::{
+    logging::{LogEntry, LogSchema},
+    metrics::{increment_counter, start_timer},
+    network::StorageServiceNetworkEvents,
+};
+use ::network::ProtocolId;
 use bounded_executor::BoundedExecutor;
+use diem_config::config::StorageServiceConfig;
+use diem_logger::prelude::*;
 use diem_types::{
     account_state_blob::AccountStatesChunkWithProof,
     epoch_change::EpochChangeProof,
@@ -32,27 +41,34 @@ use storage_service_types::{
 use thiserror::Error;
 use tokio::runtime::Handle;
 
-// TODO(joshlind): make these configurable.
 /// Storage server constants.
-pub const MAX_EPOCH_CHUNK_SIZE: u64 = 1000;
-pub const MAX_TRANSACTION_CHUNK_SIZE: u64 = 1000;
-pub const MAX_TRANSACTION_OUTPUT_CHUNK_SIZE: u64 = 1000;
-pub const MAX_ACCOUNT_STATES_CHUNK_SIZE: u64 = 1000;
 pub const STORAGE_SERVER_VERSION: u64 = 1;
-pub const MAX_CONCURRENT_REQUESTS: u64 = 100;
 
-// TODO(philiphayes): is this error type providing enough value?
 #[derive(Clone, Debug, Deserialize, Error, PartialEq, Serialize)]
 pub enum Error {
+    #[error("Invalid request received: {0}")]
+    InvalidRequest(String),
     #[error("Storage error encountered: {0}")]
     StorageErrorEncountered(String),
     #[error("Unexpected error encountered: {0}")]
     UnexpectedErrorEncountered(String),
 }
 
+impl Error {
+    /// Returns a summary label for the error type
+    fn get_label(&self) -> &'static str {
+        match self {
+            Error::InvalidRequest(_) => "invalid_request",
+            Error::StorageErrorEncountered(_) => "storage_error",
+            Error::UnexpectedErrorEncountered(_) => "unexpected_error",
+        }
+    }
+}
+
 /// The server-side actor for the storage service. Handles inbound storage
 /// service requests from clients.
 pub struct StorageServiceServer<T> {
+    config: StorageServiceConfig,
     bounded_executor: BoundedExecutor,
     storage: T,
     // TODO(philiphayes): would like a "multi-network" stream here, so we only
@@ -62,12 +78,16 @@ pub struct StorageServiceServer<T> {
 
 impl<T: StorageReaderInterface> StorageServiceServer<T> {
     pub fn new(
+        config: StorageServiceConfig,
         executor: Handle,
         storage: T,
         network_requests: StorageServiceNetworkEvents,
     ) -> Self {
+        let bounded_executor =
+            BoundedExecutor::new(config.max_concurrent_requests as usize, executor);
         Self {
-            bounded_executor: BoundedExecutor::new(MAX_CONCURRENT_REQUESTS as usize, executor),
+            config,
+            bounded_executor,
             storage,
             network_requests,
         }
@@ -75,15 +95,24 @@ impl<T: StorageReaderInterface> StorageServiceServer<T> {
 
     pub async fn start(mut self) {
         while let Some(request) = self.network_requests.next().await {
-            let storage = self.storage.clone();
+            // Log the request
+            let (peer, protocol, request, response_sender) = request;
+            debug!(LogSchema::new(LogEntry::ReceivedStorageRequest)
+                .request(&request)
+                .message(&format!(
+                    "Received storage request. Peer: {:?}, protocol: {:?}.",
+                    peer, protocol,
+                )));
 
             // All handler methods are currently CPU-bound and synchronous
             // I/O-bound, so we want to spawn on the blocking thread pool to
             // avoid starving other async tasks on the same runtime.
+            let storage = self.storage.clone();
+            let config = self.config;
             self.bounded_executor
                 .spawn_blocking(move || {
-                    let (_peer, _protocol, request, response_sender) = request;
-                    let response = Handler::new(storage).call(request);
+                    let response = Handler::new(config, storage).call(protocol, request);
+                    debug!(LogSchema::new(LogEntry::SentStorageResponse).response(&response));
                     response_sender.send(response);
                 })
                 .await;
@@ -96,16 +125,36 @@ impl<T: StorageReaderInterface> StorageServiceServer<T> {
 /// request. We usually clone/create a new handler for every request.
 #[derive(Clone)]
 pub struct Handler<T> {
+    config: StorageServiceConfig,
     storage: T,
 }
 
 impl<T: StorageReaderInterface> Handler<T> {
-    pub fn new(storage: T) -> Self {
-        Self { storage }
+    pub fn new(config: StorageServiceConfig, storage: T) -> Self {
+        Self { config, storage }
     }
 
-    pub fn call(&self, request: StorageServiceRequest) -> Result<StorageServiceResponse> {
-        let response = match request {
+    pub fn call(
+        &self,
+        protocol: ProtocolId,
+        request: StorageServiceRequest,
+    ) -> Result<StorageServiceResponse> {
+        // Update the request count
+        increment_counter(
+            &metrics::STORAGE_REQUESTS_RECEIVED,
+            protocol,
+            request.get_label().into(),
+        );
+
+        // Time the request processing (the timer will stop when it's dropped)
+        let _timer = start_timer(
+            &metrics::STORAGE_REQUEST_PROCESSING_LATENCY,
+            protocol,
+            request.get_label().into(),
+        );
+
+        // Process the request
+        let response = match &request {
             StorageServiceRequest::GetAccountStatesChunkWithProof(request) => {
                 self.get_account_states_chunk_with_proof(request)
             }
@@ -113,7 +162,7 @@ impl<T: StorageReaderInterface> Handler<T> {
                 self.get_epoch_ending_ledger_infos(request)
             }
             StorageServiceRequest::GetNumberOfAccountsAtVersion(version) => {
-                self.get_number_of_accounts_at_version(version)
+                self.get_number_of_accounts_at_version(*version)
             }
             StorageServiceRequest::GetServerProtocolVersion => self.get_server_protocol_version(),
             StorageServiceRequest::GetStorageServerSummary => self.get_storage_server_summary(),
@@ -125,22 +174,38 @@ impl<T: StorageReaderInterface> Handler<T> {
             }
         };
 
-        // If any requests resulted in an unexpected error, return an InternalStorageError to the
-        // client and log the actual error.
-        response.map_err(|_err| {
-            // TODO(joshlind): add logging support to this library so we can log _error
-            StorageServiceError::InternalError
-        })
+        // If the request resulted in an unexpected error, return an internal error
+        match response {
+            Err(error) => {
+                increment_counter(
+                    &metrics::STORAGE_ERRORS_ENCOUNTERED,
+                    protocol,
+                    error.get_label().into(),
+                );
+                error!(LogSchema::new(LogEntry::StorageServiceError)
+                    .error(&error)
+                    .request(&request));
+                Err(StorageServiceError::InternalError(error.to_string()))
+            }
+            Ok(response) => {
+                increment_counter(
+                    &metrics::STORAGE_RESPONSES_SENT,
+                    protocol,
+                    response.get_label().into(),
+                );
+                Ok(response)
+            }
+        }
     }
 
     fn get_account_states_chunk_with_proof(
         &self,
-        request: AccountStatesChunkWithProofRequest,
+        request: &AccountStatesChunkWithProofRequest,
     ) -> Result<StorageServiceResponse, Error> {
         let account_states_chunk_with_proof = self.storage.get_account_states_chunk_with_proof(
             request.version,
             request.start_account_index,
-            request.expected_num_account_states,
+            request.end_account_index,
         )?;
 
         Ok(StorageServiceResponse::AccountStatesChunkWithProof(
@@ -150,7 +215,7 @@ impl<T: StorageReaderInterface> Handler<T> {
 
     fn get_epoch_ending_ledger_infos(
         &self,
-        request: EpochEndingLedgerInfoRequest,
+        request: &EpochEndingLedgerInfoRequest,
     ) -> Result<StorageServiceResponse, Error> {
         let epoch_change_proof = self
             .storage
@@ -184,10 +249,10 @@ impl<T: StorageReaderInterface> Handler<T> {
     fn get_storage_server_summary(&self) -> Result<StorageServiceResponse, Error> {
         let storage_server_summary = StorageServerSummary {
             protocol_metadata: ProtocolMetadata {
-                max_epoch_chunk_size: MAX_EPOCH_CHUNK_SIZE,
-                max_transaction_chunk_size: MAX_TRANSACTION_CHUNK_SIZE,
-                max_transaction_output_chunk_size: MAX_TRANSACTION_OUTPUT_CHUNK_SIZE,
-                max_account_states_chunk_size: MAX_ACCOUNT_STATES_CHUNK_SIZE,
+                max_epoch_chunk_size: self.config.max_epoch_chunk_size,
+                max_transaction_chunk_size: self.config.max_transaction_chunk_size,
+                max_transaction_output_chunk_size: self.config.max_transaction_output_chunk_size,
+                max_account_states_chunk_size: self.config.max_account_states_chunk_sizes,
             },
             data_summary: self.storage.get_data_summary()?,
         };
@@ -199,12 +264,12 @@ impl<T: StorageReaderInterface> Handler<T> {
 
     fn get_transaction_outputs_with_proof(
         &self,
-        request: TransactionOutputsWithProofRequest,
+        request: &TransactionOutputsWithProofRequest,
     ) -> Result<StorageServiceResponse, Error> {
         let transaction_output_list_with_proof = self.storage.get_transaction_outputs_with_proof(
             request.proof_version,
             request.start_version,
-            request.expected_num_outputs,
+            request.end_version,
         )?;
 
         Ok(StorageServiceResponse::TransactionOutputsWithProof(
@@ -214,12 +279,12 @@ impl<T: StorageReaderInterface> Handler<T> {
 
     fn get_transactions_with_proof(
         &self,
-        request: TransactionsWithProofRequest,
+        request: &TransactionsWithProofRequest,
     ) -> Result<StorageServiceResponse, Error> {
         let transactions_with_proof = self.storage.get_transactions_with_proof(
             request.proof_version,
             request.start_version,
-            request.expected_num_transactions,
+            request.end_version,
             request.include_events,
         )?;
 
@@ -236,19 +301,19 @@ pub trait StorageReaderInterface: Clone + Send + 'static {
     fn get_data_summary(&self) -> Result<DataSummary, Error>;
 
     /// Returns a list of transactions with a proof relative to the
-    /// `proof_version`. The transaction list is expected to contain *at most*
-    /// `expected_num_transactions` and start at `start_version`.
+    /// `proof_version`. The transaction list is expected to start at
+    /// `start_version` and end at `end_version` (inclusive).
     /// If `include_events` is true, events are also returned.
     fn get_transactions_with_proof(
         &self,
         proof_version: u64,
         start_version: u64,
-        expected_num_transactions: u64,
+        end_version: u64,
         include_events: bool,
     ) -> Result<TransactionListWithProof, Error>;
 
     /// Returns a list of epoch ending ledger infos, starting at `start_epoch`
-    /// and ending *at most* at the `expected_end_epoch`.
+    /// and ending at the `expected_end_epoch` (inclusive).
     fn get_epoch_ending_ledger_infos(
         &self,
         start_epoch: u64,
@@ -256,13 +321,13 @@ pub trait StorageReaderInterface: Clone + Send + 'static {
     ) -> Result<EpochChangeProof, Error>;
 
     /// Returns a list of transaction outputs with a proof relative to the
-    /// `proof_version`. The transaction output list is expected to contain
-    /// *at most* `expected_num_transaction_outputs` and start at `start_version`.
+    /// `proof_version`. The transaction output list is expected to start at
+    /// `start_version` and end at `end_version` (inclusive).
     fn get_transaction_outputs_with_proof(
         &self,
         proof_version: u64,
         start_version: u64,
-        expected_num_transaction_outputs: u64,
+        end_version: u64,
     ) -> Result<TransactionOutputListWithProof, Error>;
 
     /// Returns the number of accounts in the account state tree at the
@@ -270,12 +335,13 @@ pub trait StorageReaderInterface: Clone + Send + 'static {
     fn get_number_of_accounts(&self, version: u64) -> Result<u64, Error>;
 
     /// Returns a chunk holding a list of account states starting at the
-    /// specified account key with *at most* `expected_num_account_states`.
+    /// specified `start_account_index` and ending at
+    /// `end_account_index` (inclusive).
     fn get_account_states_chunk_with_proof(
         &self,
         version: u64,
         start_account_index: u64,
-        expected_num_account_states: u64,
+        end_account_index: u64,
     ) -> Result<AccountStatesChunkWithProof, Error>;
 }
 
@@ -290,6 +356,82 @@ impl StorageReader {
     pub fn new(storage: Arc<dyn DbReader<DpnProto>>) -> Self {
         Self { storage }
     }
+
+    /// Returns the account states range held in the database (lowest to highest).
+    /// Note: it is currently assumed that if a node contains a transaction at a
+    /// version, V, the node also contains all account states at V.
+    fn fetch_account_states_range(
+        &self,
+        latest_version: Version,
+        transactions_range: &Option<CompleteDataRange<Version>>,
+    ) -> Result<Option<CompleteDataRange<Version>>, Error> {
+        let pruning_window = self
+            .storage
+            .get_state_prune_window()
+            .map(|window| window as u64);
+        if let Some(pruning_window) = pruning_window {
+            if latest_version > pruning_window {
+                // lowest_account_version = latest_version - pruning_window + 1;
+                let mut lowest_account_version =
+                    latest_version.checked_sub(pruning_window).ok_or_else(|| {
+                        Error::UnexpectedErrorEncountered(
+                            "Lowest account states version has overflown!".into(),
+                        )
+                    })?;
+                lowest_account_version =
+                    lowest_account_version.checked_add(1).ok_or_else(|| {
+                        Error::UnexpectedErrorEncountered(
+                            "Lowest account states version has overflown!".into(),
+                        )
+                    })?;
+
+                // Create the account range
+                let account_range = CompleteDataRange::new(lowest_account_version, latest_version)
+                    .map_err(|error| Error::UnexpectedErrorEncountered(error.to_string()))?;
+                return Ok(Some(account_range));
+            }
+        }
+
+        // No pruning has occurred. Return the transactions range.
+        Ok(*transactions_range)
+    }
+
+    /// Returns the transaction range held in the database (lowest to highest).
+    fn fetch_transaction_range(
+        &self,
+        latest_version: Version,
+    ) -> Result<Option<CompleteDataRange<Version>>, Error> {
+        let first_transaction_version = self
+            .storage
+            .get_first_txn_version()
+            .map_err(|error| Error::StorageErrorEncountered(error.to_string()))?;
+        if let Some(first_transaction_version) = first_transaction_version {
+            let transaction_range =
+                CompleteDataRange::new(first_transaction_version, latest_version)
+                    .map_err(|error| Error::UnexpectedErrorEncountered(error.to_string()))?;
+            Ok(Some(transaction_range))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Returns the transaction output range held in the database (lowest to highest).
+    fn fetch_transaction_output_range(
+        &self,
+        latest_version: Version,
+    ) -> Result<Option<CompleteDataRange<Version>>, Error> {
+        let first_output_version = self
+            .storage
+            .get_first_write_set_version()
+            .map_err(|error| Error::StorageErrorEncountered(error.to_string()))?;
+        if let Some(first_output_version) = first_output_version {
+            let output_range = CompleteDataRange::new(first_output_version, latest_version)
+                .map_err(|error| Error::UnexpectedErrorEncountered(error.to_string()))?;
+            Ok(Some(output_range))
+        } else {
+            Ok(None)
+        }
+    }
 }
 
 impl StorageReaderInterface for StorageReader {
@@ -298,20 +440,35 @@ impl StorageReaderInterface for StorageReader {
         let latest_ledger_info_with_sigs = self
             .storage
             .get_latest_ledger_info()
-            .map_err(|error| Error::StorageErrorEncountered(error.to_string()))?;
+            .map_err(|err| Error::StorageErrorEncountered(err.to_string()))?;
+
+        // Fetch the epoch ending ledger info range
         let latest_ledger_info = latest_ledger_info_with_sigs.ledger_info();
         let latest_epoch = latest_ledger_info.epoch();
-        let latest_version = latest_ledger_info.version();
+        let epoch_ending_ledger_infos = if latest_epoch == 0 {
+            None // We haven't seen an epoch change yet
+        } else {
+            let highest_ending_epoch = latest_epoch.checked_sub(1).ok_or_else(|| {
+                Error::UnexpectedErrorEncountered("Highest ending epoch overflowed!".into())
+            })?;
+            Some(CompleteDataRange::from_genesis(highest_ending_epoch))
+        };
 
-        // TODO(joshlind): Update the DiemDB to support fetching all of this data!
-        // For now we assume everything (since genesis) is held.
+        // Fetch the transaction and transaction output ranges
+        let latest_version = latest_ledger_info.version();
+        let transactions = self.fetch_transaction_range(latest_version)?;
+        let transaction_outputs = self.fetch_transaction_output_range(latest_version)?;
+
+        // Fetch the account states range
+        let account_states = self.fetch_account_states_range(latest_version, &transactions)?;
+
         // Return the relevant data summary
         let data_summary = DataSummary {
-            synced_ledger_info: latest_ledger_info_with_sigs,
-            epoch_ending_ledger_infos: CompleteDataRange::new(0, latest_epoch - 1),
-            transactions: CompleteDataRange::new(0, latest_version),
-            transaction_outputs: CompleteDataRange::new(0, latest_version),
-            account_states: CompleteDataRange::new(0, latest_version),
+            synced_ledger_info: Some(latest_ledger_info_with_sigs),
+            epoch_ending_ledger_infos,
+            transactions,
+            transaction_outputs,
+            account_states,
         };
 
         Ok(data_summary)
@@ -321,9 +478,10 @@ impl StorageReaderInterface for StorageReader {
         &self,
         proof_version: u64,
         start_version: u64,
-        expected_num_transactions: u64,
+        end_version: u64,
         include_events: bool,
     ) -> Result<TransactionListWithProof, Error> {
+        let expected_num_transactions = inclusive_range_len(start_version, end_version)?;
         let transaction_list_with_proof = self
             .storage
             .get_transactions(
@@ -350,32 +508,54 @@ impl StorageReaderInterface for StorageReader {
 
     fn get_transaction_outputs_with_proof(
         &self,
-        _proof_version: u64,
-        _start_version: u64,
-        _expected_num_transaction_outputs: u64,
+        proof_version: u64,
+        start_version: u64,
+        end_version: u64,
     ) -> Result<TransactionOutputListWithProof, Error> {
-        // TODO(joshlind): implement this once the transaction outputs are persisted in the DB.
-        Err(Error::UnexpectedErrorEncountered(
-            "Unimplemented! This API call needs to be implemented!".into(),
-        ))
+        let expected_num_outputs = inclusive_range_len(start_version, end_version)?;
+        let output_list_with_proof = self
+            .storage
+            .get_transaction_outputs(start_version, expected_num_outputs, proof_version)
+            .map_err(|error| Error::StorageErrorEncountered(error.to_string()))?;
+        Ok(output_list_with_proof)
+    }
+
+    fn get_number_of_accounts(&self, version: u64) -> Result<u64, Error> {
+        let number_of_accounts = self
+            .storage
+            .get_account_count(version)
+            .map_err(|error| Error::StorageErrorEncountered(error.to_string()))?;
+        Ok(number_of_accounts as u64)
     }
 
     fn get_account_states_chunk_with_proof(
         &self,
-        _version: u64,
-        _start_account_index: u64,
-        _expected_num_account_states: u64,
+        version: u64,
+        start_account_index: u64,
+        end_account_index: u64,
     ) -> Result<AccountStatesChunkWithProof, Error> {
-        // TODO(joshlind): implement this once DbReaderWriter supports these calls.
-        Err(Error::UnexpectedErrorEncountered(
-            "Unimplemented! This API call needs to be implemented!".into(),
-        ))
+        let expected_num_accounts = inclusive_range_len(start_account_index, end_account_index)?;
+        let account_states_chunk_with_proof = self
+            .storage
+            .get_account_chunk_with_proof(
+                version,
+                start_account_index as usize,
+                expected_num_accounts as usize,
+            )
+            .map_err(|error| Error::StorageErrorEncountered(error.to_string()))?;
+        Ok(account_states_chunk_with_proof)
     }
+}
 
-    fn get_number_of_accounts(&self, _version: u64) -> Result<u64, Error> {
-        // TODO(joshlind): implement this once DbReaderWriter supports these calls.
-        Err(Error::UnexpectedErrorEncountered(
-            "Unimplemented! This API call needs to be implemented!".into(),
-        ))
-    }
+/// Calculate `(start..=end).len()`. Returns an error if `end < start` or
+/// `end == u64::MAX`.
+fn inclusive_range_len(start: u64, end: u64) -> Result<u64, Error> {
+    // len = end - start + 1
+    let len = end.checked_sub(start).ok_or_else(|| {
+        Error::InvalidRequest(format!("end ({}) must be >= start ({})", end, start))
+    })?;
+    let len = len
+        .checked_add(1)
+        .ok_or_else(|| Error::InvalidRequest(format!("end ({}) must not be u64::MAX", end)))?;
+    Ok(len)
 }

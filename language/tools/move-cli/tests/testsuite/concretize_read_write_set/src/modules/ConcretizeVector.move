@@ -6,8 +6,8 @@ module 0x1::ConcretizeVector {
     struct T has key { f: u64 }
 
     public(script) fun publish(account1: signer, account2: signer) {
-        assert(Signer::address_of(&account1) == @0x1, 1);
-        assert(Signer::address_of(&account2) == @0x2, 2);
+        assert!(Signer::address_of(&account1) == @0x1, 1);
+        assert!(Signer::address_of(&account2) == @0x2, 2);
         move_to(&account1, T { f: 1 });
         move_to(&account2, T { f: 2 });
 
@@ -20,10 +20,10 @@ module 0x1::ConcretizeVector {
         move_to(&account1, S { v: addrs });
     }
 
-    public(script) fun read_vec(a: address): u64 acquires S, T {
+    public(script) fun read_vec(a: address) acquires S, T {
         let addrs = &borrow_global<S>(a).v;
         let addr = *Vector::borrow(addrs, 1);
-        borrow_global<T>(addr).f
+        borrow_global<T>(addr).f;
     }
 
     public(script) fun write_vec(a: address, x: u64) acquires S, T {

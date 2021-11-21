@@ -6,16 +6,14 @@ use crate::{
     types::{
         account_config::{xdx_type_tag, xus_tag, XDX_NAME, XUS_NAME},
         chain_id::ChainId,
-        transaction::{
-            authenticator::AuthenticationKey, Module, RawTransaction, TransactionPayload,
-        },
+        transaction::{authenticator::AuthenticationKey, RawTransaction, TransactionPayload},
     },
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 pub use diem_transaction_builder::stdlib;
-use diem_types::transaction::{ChangeSet, Script, WriteSetPayload};
+use diem_types::transaction::{ChangeSet, ModuleBundle, Script, ScriptFunction, WriteSetPayload};
 
 pub struct TransactionBuilder {
     sender: Option<AccountAddress>,
@@ -136,13 +134,19 @@ impl TransactionFactory {
     }
 
     pub fn module(&self, code: Vec<u8>) -> TransactionBuilder {
-        self.payload(TransactionPayload::Module(Module::new(code)))
+        self.payload(TransactionPayload::ModuleBundle(ModuleBundle::singleton(
+            code,
+        )))
     }
 
     pub fn change_set(&self, change_set: ChangeSet) -> TransactionBuilder {
         self.payload(TransactionPayload::WriteSet(WriteSetPayload::Direct(
             change_set,
         )))
+    }
+
+    pub fn script_function(&self, func: ScriptFunction) -> TransactionBuilder {
+        self.payload(TransactionPayload::ScriptFunction(func))
     }
 
     pub fn add_currency_to_account(&self, currency: Currency) -> TransactionBuilder {

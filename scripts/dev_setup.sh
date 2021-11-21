@@ -19,6 +19,7 @@ HADOLINT_VERSION=1.17.4
 SCCACHE_VERSION=0.2.16-alpha.0
 #If installing sccache from a git repp set url@revision.
 SCCACHE_GIT='https://github.com/diem/sccache.git@ef50d87a58260c30767520045e242ccdbdb965af'
+GRCOV_VERSION=0.8.2
 GUPPY_GIT='https://github.com/facebookincubator/cargo-guppy@39ec940f36b0a0df96a330243d127cbe2db9f919'
 KUBECTL_VERSION=1.18.6
 TERRAFORM_VERSION=0.12.26
@@ -26,8 +27,9 @@ HELM_VERSION=3.2.4
 VAULT_VERSION=1.5.0
 Z3_VERSION=4.8.9
 CVC4_VERSION=aac53f51
+CVC5_VERSION=0.0.3
 DOTNET_VERSION=5.0
-BOOGIE_VERSION=2.9.0
+BOOGIE_VERSION=2.9.6
 PYRE_CHECK_VERSION=0.0.59
 NUMPY_VERSION=1.20.1
 ALLURE_VERSION=2.15.pr1135
@@ -42,8 +44,9 @@ function usage {
   echo "-p update ${HOME}/.profile"
   echo "-t install build tools"
   echo "-o install operations tooling as well: helm, terraform, hadolint, yamllint, vault, docker, kubectl, python3"
-  echo "-y installs or updates Move prover tools: z3, cvc4, dotnet, boogie"
+  echo "-y installs or updates Move prover tools: z3, cvc4, cvc5, dotnet, boogie"
   echo "-s installs or updates requirements to test code-generation for Move SDKs"
+  echo "-a install tools for build and test api"
   echo "-v verbose mode"
   echo "-i installs an individual tool by name"
   echo "-n will target the /opt/ dir rather than the $HOME dir.  /opt/bin/, /opt/rustup/, and /opt/dotnet/ rather than $HOME/bin/, $HOME/.rustup/, and $HOME/.dotnet/"
@@ -88,6 +91,7 @@ function update_path_and_profile {
     add_to_profile "export PATH=\"${DOTNET_ROOT}/tools:\$PATH\""
     add_to_profile "export Z3_EXE=\"${BIN_DIR}/z3\""
     add_to_profile "export CVC4_EXE=\"${BIN_DIR}/cvc4\""
+    add_to_profile "export CVC5_EXE=\"${BIN_DIR}/cvc5\""
     add_to_profile "export BOOGIE_EXE=\"${DOTNET_ROOT}/tools/boogie\""
   fi
   if [[ "$INSTALL_CODEGEN" == "true" ]] && [[ "$PACKAGE_MANAGER" == "apt-get" ]]; then
@@ -269,7 +273,7 @@ function install_pkg {
   if [ "$(whoami)" != 'root' ]; then
     PRE_COMMAND=(sudo)
   fi
-  if which "$package" &>/dev/null; then
+  if command -v "$package" &>/dev/null; then
     echo "$package is already installed"
   else
     echo "Installing ${package}."
@@ -400,9 +404,9 @@ function install_sccache {
     if [[ -n "${SCCACHE_GIT}" ]]; then
       git_repo=$( echo "$SCCACHE_GIT" | cut -d "@" -f 1 );
       git_hash=$( echo "$SCCACHE_GIT" | cut -d "@" -f 2 );
-      cargo install sccache --git "$git_repo" --rev "$git_hash" --features s3;
+      cargo install sccache --git "$git_repo" --rev "$git_hash" --features s3 --locked
     else
-      cargo install sccache --version="${SCCACHE_VERSION}" --features s3;
+      cargo install sccache --version="${SCCACHE_VERSION}" --features s3 --locked
     fi
   fi
 }
@@ -411,13 +415,13 @@ function install_cargo_guppy {
   if ! command -v cargo-guppy &> /dev/null; then
     git_repo=$( echo "$GUPPY_GIT" | cut -d "@" -f 1 );
     git_hash=$( echo "$GUPPY_GIT" | cut -d "@" -f 2 );
-    cargo install cargo-guppy --git "$git_repo" --rev "$git_hash";
+    cargo install cargo-guppy --git "$git_repo" --rev "$git_hash" --locked
   fi
 }
 
 function install_grcov {
   if ! command -v grcov &> /dev/null; then
-    cargo install grcov
+    cargo install grcov --version="${GRCOV_VERSION}" --locked
   fi
 }
 
@@ -466,12 +470,12 @@ function install_boogie {
 
 function install_z3 {
   echo "Installing Z3"
-  if which /usr/local/bin/z3 &>/dev/null; then
+  if command -v /usr/local/bin/z3 &>/dev/null; then
     echo "z3 already exists at /usr/local/bin/z3"
     echo "but this install will go to ${INSTALL_DIR}/z3."
     echo "you may want to remove the shared instance to avoid version confusion"
   fi
-  if which "${INSTALL_DIR}z3" &>/dev/null && [[ "$("${INSTALL_DIR}z3" --version || true)" =~ .*${Z3_VERSION}.* ]]; then
+  if command -v "${INSTALL_DIR}z3" &>/dev/null && [[ "$("${INSTALL_DIR}z3" --version || true)" =~ .*${Z3_VERSION}.* ]]; then
      echo "Z3 ${Z3_VERSION} already installed"
      return
   fi
@@ -498,12 +502,12 @@ function install_z3 {
 
 function install_cvc4 {
   echo "Installing CVC4"
-  if which /usr/local/bin/cvc4 &>/dev/null; then
+  if command -v /usr/local/bin/cvc4 &>/dev/null; then
     echo "cvc4 already exists at /usr/local/bin/cvc4"
     echo "but this install will go to $${INSTALL_DIR}cvc4."
     echo "you may want to remove the shared instance to avoid version confusion"
   fi
-  if which "${INSTALL_DIR}cvc4" &>/dev/null && [[ "$("${INSTALL_DIR}cvc4" --version || true)" =~ .*${CVC4_VERSION}.* ]]; then
+  if command -v "${INSTALL_DIR}cvc4" &>/dev/null && [[ "$("${INSTALL_DIR}cvc4" --version || true)" =~ .*${CVC4_VERSION}.* ]]; then
      echo "CVC4 ${CVC4_VERSION} already installed"
      return
   fi
@@ -528,18 +532,45 @@ function install_cvc4 {
   rm -rf "$TMPFILE"
 }
 
+function install_cvc5 {
+  echo "Installing cvc5"
+  if command -v /usr/local/bin/cvc5 &>/dev/null; then
+    echo "cvc5 already exists at /usr/local/bin/cvc5"
+    echo "but this install will go to $${INSTALL_DIR}cvc5."
+    echo "you may want to remove the shared instance to avoid version confusion"
+  fi
+  if command -v "${INSTALL_DIR}cvc5" &>/dev/null && [[ "$("${INSTALL_DIR}cvc5" --version || true)" =~ .*${CVC5_VERSION}.* ]]; then
+     echo "cvc5 ${CVC5_VERSION} already installed"
+     return
+  fi
+  if [[ "$(uname)" == "Linux" ]]; then
+    CVC5_PKG="cvc5-Linux"
+  elif [[ "$(uname)" == "Darwin" ]]; then
+    CVC5_PKG="cvc5-macOS"
+  else
+    echo "cvc5 support not configured for this platform (uname=$(uname))"
+    return
+  fi
+  TMPFILE=$(mktemp)
+  rm "$TMPFILE"
+  mkdir -p "$TMPFILE"/
+  (
+    cd "$TMPFILE" || exit
+    curl -LOs "https://github.com/cvc5/cvc5/releases/download/cvc5-$CVC5_VERSION/$CVC5_PKG"
+    cp "$CVC5_PKG" "${INSTALL_DIR}cvc5"
+    chmod +x "${INSTALL_DIR}cvc5"
+  )
+  rm -rf "$TMPFILE"
+}
+
 function install_golang {
     if [[ $(go version | grep -c "go1.14" || true) == "0" ]]; then
       if [[ "$PACKAGE_MANAGER" == "apt-get" ]]; then
-        if ! grep -q 'buster-backports main' /etc/apt/sources.list; then
-          (
-            echo "deb http://http.us.debian.org/debian/ buster-backports main"
-            echo "deb-src http://http.us.debian.org/debian/ buster-backports main"
-          ) | "${PRE_COMMAND[@]}" tee -a /etc/apt/sources.list
-          "${PRE_COMMAND[@]}" apt-get update
-        fi
-        "${PRE_COMMAND[@]}" apt-get install -y golang-1.14-go/buster-backports
-        "${PRE_COMMAND[@]}" ln -sf /usr/lib/go-1.14 /usr/lib/golang
+        curl -LO https://golang.org/dl/go1.14.15.linux-amd64.tar.gz
+        "${PRE_COMMAND[@]}" rm -rf /usr/local/go
+        "${PRE_COMMAND[@]}" tar -C /usr/local -xzf go1.14.15.linux-amd64.tar.gz
+        "${PRE_COMMAND[@]}" ln -sf /usr/local/go /usr/lib/golang
+        rm go1.14.15.linux-amd64.tar.gz
       elif [[ "$PACKAGE_MANAGER" == "apk" ]]; then
         apk --update add --no-cache git make musl-dev go
       elif [[ "$PACKAGE_MANAGER" == "brew" ]]; then
@@ -576,7 +607,7 @@ function install_allure {
         "${PRE_COMMAND[@]}" apt-get install default-jre -y --no-install-recommends
         export ALLURE=${HOME}/allure_"${ALLURE_VERSION}"-1_all.deb
         curl -sL -o "$ALLURE" "https://github.com/diem/allure2/releases/download/${ALLURE_VERSION}/allure_${ALLURE_VERSION}-1_all.deb"
-        dpkg -i "$ALLURE"
+        "${PRE_COMMAND[@]}" dpkg -i "$ALLURE"
         rm "$ALLURE"
       elif [[ "$PACKAGE_MANAGER" == "apk" ]]; then
         apk --update add --no-cache  -X http://dl-cdn.alpinelinux.org/alpine/edge/community openjdk11
@@ -592,6 +623,28 @@ function install_xsltproc {
     else
       install_pkg libxslt "$PACKAGE_MANAGER"
     fi
+}
+
+function install_nodejs {
+    if [[ "$PACKAGE_MANAGER" == "apt-get" ]]; then
+      curl -fsSL https://deb.nodesource.com/setup_14.x | bash -
+      apt-get install -y nodejs
+    else
+      install_pkg nodejs "$PACKAGE_MANAGER"
+    fi
+    install_pkg npm "$PACKAGE_MANAGER"
+}
+
+function install_python3 {
+  if [[ "$PACKAGE_MANAGER" == "apt-get" ]]; then
+    install_pkg python3-all-dev "$PACKAGE_MANAGER"
+    install_pkg python3-setuptools "$PACKAGE_MANAGER"
+    install_pkg python3-pip "$PACKAGE_MANAGER"
+  elif [[ "$PACKAGE_MANAGER" == "apk" ]]; then
+    install_pkg python3-dev "$PACKAGE_MANAGER"
+  else
+    install_pkg python3 "$PACKAGE_MANAGER"
+  fi
 }
 
 function welcome_message {
@@ -616,6 +669,7 @@ Build tools (since -t or no option was provided):
   * libssl-dev
   * sccache
   * if linux, gcc-powerpc-linux-gnu
+  * NodeJS / NPM
 EOF
   fi
 
@@ -639,6 +693,7 @@ cat <<EOF
 Move prover tools (since -y was provided):
   * z3
   * cvc4
+  * cvc5
   * dotnet
   * boogie
 EOF
@@ -651,8 +706,14 @@ Codegen tools (since -s was provided):
   * Python3 (numpy, pyre-check)
   * Golang
   * Java
-  * Node-js/NPM
   * Deno
+EOF
+  fi
+
+  if [[ "$INSTALL_API_BUILD_TOOLS" == "true" ]]; then
+cat <<EOF
+API build and testing tools (since -a was provided):
+  * Python3 (schemathesis)
 EOF
   fi
 
@@ -675,13 +736,14 @@ OPERATIONS=false;
 INSTALL_PROFILE=false;
 INSTALL_PROVER=false;
 INSTALL_CODEGEN=false;
+INSTALL_API_BUILD_TOOLS=false;
 INSTALL_INDIVIDUAL=false;
 INSTALL_PACKAGES=();
 INSTALL_DIR="${HOME}/bin/"
 OPT_DIR="false"
 
 #parse args
-while getopts "btopvysh:i:n" arg; do
+while getopts "btopvysah:i:n" arg; do
   case "$arg" in
     b)
       BATCH_MODE="true"
@@ -703,6 +765,9 @@ while getopts "btopvysh:i:n" arg; do
       ;;
     s)
       INSTALL_CODEGEN="true"
+      ;;
+    a)
+      INSTALL_API_BUILD_TOOLS="true"
       ;;
     i)
       INSTALL_INDIVIDUAL="true"
@@ -728,6 +793,7 @@ if [[ "$INSTALL_BUILD_TOOLS" == "false" ]] && \
    [[ "$INSTALL_PROFILE" == "false" ]] && \
    [[ "$INSTALL_PROVER" == "false" ]] && \
    [[ "$INSTALL_CODEGEN" == "false" ]] && \
+   [[ "$INSTALL_API_BUILD_TOOLS" == "false" ]] && \
    [[ "$INSTALL_INDIVIDUAL" == "false" ]]; then
    INSTALL_BUILD_TOOLS="true"
 fi
@@ -765,7 +831,7 @@ if [[ "$(uname)" == "Linux" ]]; then
 		exit 1
 	fi
 elif [[ "$(uname)" == "Darwin" ]]; then
-	if which brew &>/dev/null; then
+	if command -v brew &>/dev/null; then
 		PACKAGE_MANAGER="brew"
 	else
 		echo "Missing package manager Homebrew (https://brew.sh/). Abort"
@@ -825,6 +891,7 @@ if [[ "$INSTALL_BUILD_TOOLS" == "true" ]]; then
   install_grcov
   install_pkg git "$PACKAGE_MANAGER"
   install_lcov "$PACKAGE_MANAGER"
+  install_nodejs "$PACKAGE_MANAGER"
 fi
 
 if [[ "$OPERATIONS" == "true" ]]; then
@@ -869,6 +936,7 @@ if [[ "$INSTALL_PROVER" == "true" ]]; then
   fi
   install_z3
   install_cvc4
+  install_cvc5
   install_dotnet
   install_boogie
 fi
@@ -876,17 +944,7 @@ fi
 if [[ "$INSTALL_CODEGEN" == "true" ]]; then
   install_pkg clang "$PACKAGE_MANAGER"
   install_pkg llvm "$PACKAGE_MANAGER"
-  if [[ "$PACKAGE_MANAGER" == "apt-get" ]]; then
-    install_pkg python3-all-dev "$PACKAGE_MANAGER"
-    install_pkg python3-setuptools "$PACKAGE_MANAGER"
-    install_pkg python3-pip "$PACKAGE_MANAGER"
-  elif [[ "$PACKAGE_MANAGER" == "apk" ]]; then
-    install_pkg python3-dev "$PACKAGE_MANAGER"
-  else
-    install_pkg python3 "$PACKAGE_MANAGER"
-  fi
-  install_pkg nodejs "$PACKAGE_MANAGER"
-  install_pkg npm "$PACKAGE_MANAGER"
+  install_python3
   install_deno
   install_java
   install_golang
@@ -896,6 +954,12 @@ if [[ "$INSTALL_CODEGEN" == "true" ]]; then
     "${PRE_COMMAND[@]}" python3 -m pip install pyre-check=="${PYRE_CHECK_VERSION}"
   fi
   "${PRE_COMMAND[@]}" python3 -m pip install numpy=="${NUMPY_VERSION}"
+fi
+
+if [[ "$INSTALL_API_BUILD_TOOLS" == "true" ]]; then
+  # python and tools
+  install_python3
+  "${PRE_COMMAND[@]}" python3 -m pip install schemathesis
 fi
 
 if [[ "${BATCH_MODE}" == "false" ]]; then

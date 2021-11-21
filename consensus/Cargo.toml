@@ -39,7 +39,7 @@ executor-types = { path = "../execution/executor-types" }
 fallible = { path = "../common/fallible" }
 bcs = "0.1.2"
 diem-config = { path = "../config" }
-diem-crypto = { path = "../crypto/crypto" }
+diem-crypto = { path = "../crates/diem-crypto" }
 diem-logger = { path = "../common/logger" }
 diem-mempool = { path = "../mempool" }
 diem-metrics = { path = "../common/metrics" }
@@ -47,7 +47,7 @@ diem-infallible = { path = "../common/infallible" }
 diem-secure-storage = { path = "../secure/storage" }
 diem-temppath = { path = "../common/temppath" }
 diem-types = { path = "../types" }
-diem-vm = { path = "../language/diem-vm" }
+diem-vm = { path = "../diem-move/diem-vm" }
 diem-workspace-hack = { path = "../common/workspace-hack" }
 network = { path = "../network" }
 safety-rules = { path = "safety-rules" }
@@ -56,6 +56,7 @@ schemadb = { path = "../storage/schemadb" }
 storage-interface = { path = "../storage/storage-interface" }
 
 [dev-dependencies]
+claim = "0.5.0"
 proptest = "1.0.0"
 tempfile = "3.2.0"
 
@@ -65,7 +66,7 @@ diem-config = { path = "../config", features = ["fuzzing"] }
 diem-mempool = { path = "../mempool", features = ["fuzzing"] }
 network = { path = "../network", features = ["fuzzing"] }
 safety-rules = { path = "safety-rules", features = ["testing"] }
-vm-genesis = { path = "../language/tools/vm-genesis" }
+vm-genesis = { path = "../diem-move/vm-genesis" }
 vm-validator = { path = "../vm-validator" }
 
 [features]

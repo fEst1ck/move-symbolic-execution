@@ -9,8 +9,8 @@ use diem_types::{
     vm_status::StatusCode,
 };
 
-use compiler::Compiler;
 use diem_types::transaction::WriteSetPayload;
+use move_ir_compiler::Compiler;
 
 #[test]
 fn admin_script_rotate_key_single_signer_no_epoch() {
@@ -40,9 +40,7 @@ main(dr_account: signer, account: signer, auth_key_prefix: vector<u8>) {
         let compiler = Compiler {
             deps: diem_framework_releases::current_modules().iter().collect(),
         };
-        compiler
-            .into_script_blob("file_name", code)
-            .expect("Failed to compile")
+        compiler.into_script_blob(code).expect("Failed to compile")
     };
     let account = Account::new_diem_root();
     let txn = account
@@ -55,7 +53,7 @@ main(dr_account: signer, account: signer, auth_key_prefix: vector<u8>) {
             ),
             execute_as: *new_account.address(),
         })
-        .sequence_number(1)
+        .sequence_number(0)
         .sign();
     executor.new_block();
     let output = executor.execute_and_apply(txn);
@@ -104,9 +102,7 @@ main(dr_account: signer, account: signer, auth_key_prefix: vector<u8>) {
         let compiler = Compiler {
             deps: diem_framework_releases::current_modules().iter().collect(),
         };
-        compiler
-            .into_script_blob("file_name", code)
-            .expect("Failed to compile")
+        compiler.into_script_blob(code).expect("Failed to compile")
     };
     let account = Account::new_diem_root();
     let txn = account
@@ -119,7 +115,7 @@ main(dr_account: signer, account: signer, auth_key_prefix: vector<u8>) {
             ),
             execute_as: *new_account.address(),
         })
-        .sequence_number(1)
+        .sequence_number(0)
         .sign();
     executor.new_block();
     let output = executor.execute_and_apply(txn);
@@ -166,9 +162,7 @@ main(account: signer, auth_key_prefix: vector<u8>) {
         let compiler = Compiler {
             deps: diem_framework_releases::current_modules().iter().collect(),
         };
-        compiler
-            .into_script_blob("file_name", code)
-            .expect("Failed to compile")
+        compiler.into_script_blob(code).expect("Failed to compile")
     };
     let account = Account::new_diem_root();
     let txn = account
@@ -181,7 +175,7 @@ main(account: signer, auth_key_prefix: vector<u8>) {
             ),
             execute_as: *new_account.address(),
         })
-        .sequence_number(1)
+        .sequence_number(0)
         .sign();
     executor.new_block();
     let output = executor.execute_transaction(txn);

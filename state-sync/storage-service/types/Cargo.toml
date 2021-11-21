@@ -10,11 +10,14 @@ publish = false
 edition = "2018"
 
 [dependencies]
+num-traits = { version = "0.2.14", default-features = false }
 serde = { version = "1.0.124", default-features = false }
 thiserror = "1.0.24"
 
-diem-crypto = { path = "../../../crypto/crypto" }
+diem-crypto = { path = "../../../crates/diem-crypto" }
 diem-types = { path = "../../../types" }
 diem-workspace-hack = { path = "../../../common/workspace-hack" }
 
 [dev-dependencies]
+claim = "0.5.0"
+proptest = "1.0.0"

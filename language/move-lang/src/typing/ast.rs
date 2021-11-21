@@ -125,7 +125,7 @@ pub enum BuiltinFunction_ {
     BorrowGlobal(bool, Type),
     Exists(Type),
     Freeze(Type),
-    Assert,
+    Assert(/* is_macro */ bool),
 }
 pub type BuiltinFunction = Spanned<BuiltinFunction_>;
 
@@ -140,6 +140,7 @@ pub enum UnannotatedExp_ {
 
     ModuleCall(Box<ModuleCall>),
     Builtin(Box<BuiltinFunction>, Box<Exp>),
+    Vector(Loc, usize, Box<Type>, Box<Exp>),
 
     IfElse(Box<Exp>, Box<Exp>, Box<Exp>),
     While(Box<Exp>, Box<Exp>),
@@ -224,7 +225,7 @@ impl BuiltinFunction_ {
             B::BorrowGlobal(true, _) => NB::BORROW_GLOBAL_MUT,
             B::Exists(_) => NB::EXISTS,
             B::Freeze(_) => NB::FREEZE,
-            B::Assert => NB::ASSERT,
+            B::Assert(_) => NB::ASSERT_MACRO,
         }
     }
 }
@@ -432,6 +433,15 @@ impl AstDebug for UnannotatedExp_ {
                 rhs.ast_debug(w);
                 w.write(")");
             }
+            E::Vector(_loc, usize, ty, elems) => {
+                w.write(format!("vector#{}", usize));
+                w.write("<");
+                ty.ast_debug(w);
+                w.write(">");
+                w.write("[");
+                elems.ast_debug(w);
+                w.write("]");
+            }
             E::Pack(m, s, tys, fields) => {
                 w.write(&format!("{}::{}", m, s));
                 w.write("<");
@@ -624,7 +634,7 @@ impl AstDebug for BuiltinFunction_ {
             F::BorrowGlobal(false, bt) => (NF::BORROW_GLOBAL, Some(bt)),
             F::Exists(bt) => (NF::EXISTS, Some(bt)),
             F::Freeze(bt) => (NF::FREEZE, Some(bt)),
-            F::Assert => (NF::ASSERT, None),
+            F::Assert(_) => (NF::ASSERT_MACRO, None),
         };
         w.write(n);
         if let Some(bt) = bt_opt {

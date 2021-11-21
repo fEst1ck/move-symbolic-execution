@@ -8,7 +8,13 @@ use crate::{
 use anyhow::Result;
 use move_lang::{compiled_unit::AnnotatedCompiledUnit, diagnostics::FilesSourceText, Compiler};
 use petgraph::algo::toposort;
-use std::{collections::BTreeMap, io::Write};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::Write,
+    path::Path,
+};
+
+use super::{compiled_package::CompilationCachingStatus, package_layout::CompiledPackageLayout};
 
 #[derive(Debug, Clone)]
 pub struct BuildPlan {
@@ -36,7 +42,10 @@ impl BuildPlan {
         })
     }
 
-    pub fn compile<W: Write>(&self, writer: &mut W) -> Result<CompiledPackage> {
+    pub fn compile<W: Write>(
+        &self,
+        writer: &mut W,
+    ) -> Result<(CompiledPackage, CompilationCachingStatus)> {
         self.compile_with_driver(writer, |compiler, _| compiler.build_and_report())
     }
 
@@ -48,10 +57,14 @@ impl BuildPlan {
             bool,
         )
             -> anyhow::Result<(FilesSourceText, Vec<AnnotatedCompiledUnit>)>,
-    ) -> Result<CompiledPackage> {
+    ) -> Result<(CompiledPackage, CompilationCachingStatus)> {
         let package_root = &self.resolution_graph.package_table[&self.root];
-        let project_root = &package_root.package_path;
-        let mut compiled: BTreeMap<PackageName, CompiledPackage> = BTreeMap::new();
+        let project_root = match &self.resolution_graph.build_options.install_dir {
+            Some(under_path) => under_path.clone(),
+            None => self.resolution_graph.root_package_path.clone(),
+        };
+        let mut compiled: BTreeMap<PackageName, (CompiledPackage, CompilationCachingStatus)> =
+            BTreeMap::new();
         for package_ident in &self.sorted_deps {
             let resolved_package = self.resolution_graph.get_package(package_ident);
             let dependencies: Vec<_> = resolved_package
@@ -61,7 +74,7 @@ impl BuildPlan {
                 .collect();
             let compiled_package = CompiledPackage::build(
                 writer,
-                project_root,
+                &project_root,
                 resolved_package.clone(),
                 dependencies,
                 &self.resolution_graph,
@@ -70,8 +83,25 @@ impl BuildPlan {
             )?;
             compiled.insert(*package_ident, compiled_package);
         }
+        let compiled_names = compiled.keys().collect::<BTreeSet<_>>();
+        Self::clean(
+            &project_root.join(CompiledPackageLayout::Root.path()),
+            compiled_names,
+        )?;
         Ok(compiled
             .remove(&package_root.source_package.package.name)
             .unwrap())
+    }
+
+    // Clean out old packages that are no longer used, or no longer used under the current
+    // compilation flags
+    fn clean(build_root: &Path, keep_paths: BTreeSet<&PackageName>) -> Result<()> {
+        for dir in std::fs::read_dir(build_root)? {
+            let path = dir?.path();
+            if !keep_paths.iter().any(|name| path.ends_with(name.as_str())) {
+                std::fs::remove_dir_all(&path)?;
+            }
+        }
+        Ok(())
     }
 }

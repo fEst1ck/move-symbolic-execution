@@ -7,14 +7,11 @@ use consensus_types::{block::Block, common::Payload, executed_block::ExecutedBlo
 use diem_crypto::HashValue;
 use diem_types::ledger_info::LedgerInfoWithSignatures;
 use executor_types::{Error as ExecutionError, StateComputeResult};
+use futures::future::BoxFuture;
 use std::sync::Arc;
 
 pub type StateComputerCommitCallBackType =
     Box<dyn FnOnce(&[Arc<ExecutedBlock>], LedgerInfoWithSignatures) + Send + Sync>;
-#[cfg(test)]
-pub fn empty_state_computer_call_back() -> StateComputerCommitCallBackType {
-    Box::new(|_, _| {})
-}
 
 /// Retrieves and updates the status of transactions on demand (e.g., via talking with Mempool)
 #[async_trait::async_trait]
@@ -22,10 +19,15 @@ pub trait TxnManager: Send + Sync {
     /// Brings new transactions to be applied.
     /// The `exclude_txns` list includes the transactions that are already pending in the
     /// branch of blocks consensus is trying to extend.
+    ///
+    /// wait_callback is executed when there's no transactions available and it decides to wait.
+    /// pending_ordering indicates if we should long poll mempool or propose empty blocks to help commit pending txns
     async fn pull_txns(
         &self,
         max_size: u64,
         exclude: Vec<&Payload>,
+        wait_callback: BoxFuture<'static, ()>,
+        pending_ordering: bool,
     ) -> Result<Payload, MempoolError>;
 
     /// Notifies TxnManager about the txns which failed execution. (Committed txns is notified by

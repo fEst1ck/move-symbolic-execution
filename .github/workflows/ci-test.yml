@@ -17,7 +17,7 @@ env:
 
 jobs:
   prepare:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     outputs:
       changes-target-branch: ${{ steps.changes.outputs.changes-target-branch }}
       changes-base-git-rev: ${{ steps.changes.outputs.changes-base-git-rev }}
@@ -35,8 +35,9 @@ jobs:
       test-non-rust-lint: ${{ steps.non-rust-lint-changes.outputs.changes-found }}
       test-docker-compose: ${{ steps.docker-compose-changes.outputs.changes-found }}
       test-test-coverage: ${{ steps.test-coverage.outputs.changes-found }}
+      test-api-spec: ${{ steps.test-api-spec.outputs.changes-found }}
     steps:
-      - uses: actions/checkout@v2.3.4
+      - uses: actions/checkout@v2.4.0
         with:
           # This ensures that the tip of the PR is checked out instead of the merge between the base ref and the tip
           # On `push` this value will be empty and will "do-the-right-thing"
@@ -113,7 +114,7 @@ jobs:
         name: find shell/dockerfile changes
         uses: diem/actions/matches@faadd16607b77dfa2231a8f366883e01717b3225
         with:
-          pattern: 'Dockerfile$\|.*.sh$|^developers.diem.com'
+          pattern: 'Dockerfile$\|.*.sh$\|^developers.diem.com'
       - id: helm-changes
         name: find helm changes
         uses: diem/actions/matches@faadd16607b77dfa2231a8f366883e01717b3225
@@ -140,9 +141,14 @@ jobs:
         uses: diem/actions/matches@faadd16607b77dfa2231a8f366883e01717b3225
         with:
           pattern: '^rust.toolchain\|^x.toml\|^devtools\|^.github\|common/logger'
+      - id: test-api-spec
+        name: find api changes.
+        uses: diem/actions/matches@faadd16607b77dfa2231a8f366883e01717b3225
+        with:
+          pattern: '^api\|^scripts/dev_setup.sh'
 
   dev-setup-sh-test:
-    runs-on: ubuntu-latest-xl
+    runs-on: ubuntu-20.04-xl
     timeout-minutes: 30
     needs: prepare
     if: ${{ needs.prepare.outputs.test-dev-setup == 'true' }}
@@ -151,14 +157,19 @@ jobs:
       matrix:
         target_os: [alpine, arch, github]
     steps:
-      - uses: actions/checkout@v2.3.4
+      - uses: actions/checkout@v2.4.0
         with:
           ref: ${{ github.event.pull_request.head.sha }}
       - name: build image with dev-setup.sh
         run: docker build -f docker/ci/${{ matrix.target_os }}/Dockerfile -t diem/build_environment:test .
+      - name: Early terminate workflow
+        if: ${{ failure() }}
+        uses: ./.github/actions/early-terminator
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
 
   build-images:
-    runs-on: ubuntu-latest-xl
+    runs-on: ubuntu-20.04-xl
     needs: prepare
     if: ${{ github.event_name == 'push' && needs.prepare.outputs.build-images == 'true' }}
     outputs:
@@ -170,7 +181,7 @@ jobs:
         target_images:
           [client faucet cluster-test forge, init tools validator validator-tcb]
     steps:
-      - uses: actions/checkout@v2.3.4
+      - uses: actions/checkout@v2.4.0
         with:
           fetch-depth: 0 #get all the history!!!
       - id: changes
@@ -225,6 +236,11 @@ jobs:
           aws ecr get-login-password --region ${{ secrets.ENV_NOVI_ECR_AWS_REGION }} | \
           docker login --username AWS --password-stdin "${AWS_ECR_ACCOUNT_URL}"
           docker/docker_republish.sh -t pre_${BRANCH}_${GIT_REV} -o land_${GIT_REV} -r ${AWS_ECR_ACCOUNT_URL} -d -i "${{ matrix.target_images }}"
+      - name: Early terminate workflow
+        if: ${{ failure() }}
+        uses: ./.github/actions/early-terminator
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
 
   need-base-images:
     runs-on: self-hosted
@@ -234,7 +250,7 @@ jobs:
       # The last matrix build to succeed will set the output.   Hilarious.
       prev-tag: ${{ steps.build-extra-images.outputs.prev-tag }}
     steps:
-      - uses: actions/checkout@v2.3.4
+      - uses: actions/checkout@v2.4.0
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0 #get all the history!!!
@@ -290,6 +306,11 @@ jobs:
             res=$PREV_TAG;
           fi
           echo "::set-output name=prev-tag::$(echo $res)";
+      - name: Early terminate workflow
+        if: ${{ failure() }}
+        uses: ./.github/actions/early-terminator
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
 
   land-blocking-test:
     name: Run land blocking test
@@ -298,7 +319,7 @@ jobs:
     if: ${{ always() && needs.build-images.result=='success' && needs.prepare.outputs.test-land-blocking == 'true' }}
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v2.3.4
+      - uses: actions/checkout@v2.4.0
         with:
           # This ensures that the tip of the PR is checked out instead of the merge between the base ref and the tip
           # On `push` this value will be empty and will "do-the-right-thing"
@@ -470,16 +491,21 @@ jobs:
             if (should_fail) {
               throw "Land-blocking test failed";
             }
+      - name: Early terminate workflow
+        if: ${{ failure() }}
+        uses: ./.github/actions/early-terminator
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
 
   non-rust-lint:
-    runs-on: ubuntu-latest-xl
+    runs-on: ubuntu-20.04-xl
     timeout-minutes: 10
     needs: prepare
     if: ${{ needs.prepare.outputs.test-non-rust-lint == 'true'  }}
     container:
-      image: diem/build_environment:${{ needs.prepare.outputs.changes-target-branch }}
+      image: ghcr.io/diem/diem_build_environment:${{ needs.prepare.outputs.changes-target-branch }}
     steps:
-      - uses: actions/checkout@v2.3.4
+      - uses: actions/checkout@v2.4.0
         with:
           ref: ${{ github.event.pull_request.head.sha }}
       - uses: ./.github/actions/build-setup
@@ -492,18 +518,24 @@ jobs:
           shellcheck scripts/weekly-dep-report.sh
       - name: docker lints
         uses: ./.github/actions/docker-checks
-
+      - name: deno lints
+        run: deno lint ./shuffle
+      - name: Early terminate workflow
+        if: ${{ failure() }}
+        uses: ./.github/actions/early-terminator
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
   lint:
-    runs-on: ubuntu-latest-xl
+    runs-on: ubuntu-20.04-xl
     timeout-minutes: 30
     needs: prepare
     if: ${{ needs.prepare.outputs.any-changes-founds == 'true' }}
     container:
-      image: diem/build_environment:${{ needs.prepare.outputs.changes-target-branch }}
+      image: ghcr.io/diem/diem_build_environment:${{ needs.prepare.outputs.changes-target-branch }}
       volumes:
         - "${{github.workspace}}:/opt/git/diem"
     steps:
-      - uses: actions/checkout@v2.3.4
+      - uses: actions/checkout@v2.4.0
         with:
           ref: ${{ github.event.pull_request.head.sha }}
       - uses: ./.github/actions/build-setup
@@ -519,18 +551,23 @@ jobs:
       - name: cargo fmt
         run: $pre_command && cargo xfmt --check
       - uses: ./.github/actions/build-teardown
+      - name: Early terminate workflow
+        if: ${{ failure() }}
+        uses: ./.github/actions/early-terminator
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
 
   unit-test:
-    runs-on: ubuntu-latest-xl
+    runs-on: ubuntu-20.04-xl
     timeout-minutes: 60
     needs: prepare
     if: ${{ needs.prepare.outputs.test-rust == 'true' }}
     container:
-      image: diem/build_environment:${{ needs.prepare.outputs.changes-target-branch }}
+      image: ghcr.io/diem/diem_build_environment:${{ needs.prepare.outputs.changes-target-branch }}
       volumes:
         - "${{github.workspace}}:/opt/git/diem"
     steps:
-      - uses: actions/checkout@v2.3.4
+      - uses: actions/checkout@v2.4.0
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0 #get all the history!!!
@@ -560,18 +597,23 @@ jobs:
           name: unit-test-results
           path: target/junit-reports/unit-test.xml
       - uses: ./.github/actions/build-teardown
+      - name: Early terminate workflow
+        if: ${{ failure() }}
+        uses: ./.github/actions/early-terminator
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
 
   codegen-unit-test:
-    runs-on: ubuntu-latest-xl
+    runs-on: ubuntu-20.04-xl
     timeout-minutes: 60
     needs: prepare
     if: ${{ needs.prepare.outputs.test-rust == 'true' }}
     container:
-      image: diem/build_environment:${{ needs.prepare.outputs.changes-target-branch }}
+      image: ghcr.io/diem/diem_build_environment:${{ needs.prepare.outputs.changes-target-branch }}
       volumes:
         - "${{github.workspace}}:/opt/git/diem"
     steps:
-      - uses: actions/checkout@v2.3.4
+      - uses: actions/checkout@v2.4.0
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0 #get all the history!!!
@@ -591,14 +633,19 @@ jobs:
           name: codegen-unit-test-results
           path: target/junit-reports/codegen-unit-test.xml
       - uses: ./.github/actions/build-teardown
+      - name: Early terminate workflow
+        if: ${{ failure() }}
+        uses: ./.github/actions/early-terminator
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
 
   e2e-test:
-    runs-on: ubuntu-latest-xl
-    timeout-minutes: 40
+    runs-on: ubuntu-20.04-xl
+    timeout-minutes: 60
     needs: prepare
     if: ${{ needs.prepare.outputs.test-rust == 'true' }}
     container:
-      image: diem/build_environment:${{ needs.prepare.outputs.changes-target-branch }}
+      image: ghcr.io/diem/diem_build_environment:${{ needs.prepare.outputs.changes-target-branch }}
       volumes:
         - "${{github.workspace}}:/opt/git/diem"
     strategy:
@@ -611,7 +658,7 @@ jobs:
       FLAKY_TESTS_FILE: /tmp/failures
       MESSAGE_PAYLOAD_FILE: /tmp/message
     steps:
-      - uses: actions/checkout@v2.3.4
+      - uses: actions/checkout@v2.4.0
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0 #get all the history!!!
@@ -621,8 +668,7 @@ jobs:
           key: ${{ needs.prepare.outputs.changes-target-branch }}
       - name: split tests
         run: |
-          cd /opt/git/diem/
-          cargo x test --package smoke-test -- --list | \
+          $pre_command && cargo x test --package smoke-test -- --list | \
             grep "::" | sed 's/: .*$//' > e2e_tests
           echo -e "Found $(wc -l e2e_tests) tests."
           # Splits the e2e test via round robin in to ${runners} number of files with single digit extensions.
@@ -634,7 +680,7 @@ jobs:
         run: |
           set +e
           num_fails=0
-          cd /opt/git/diem/
+          $pre_command
           export RUST_BACKTRACE=full
           failed_tests=
           for target in $(cat /tmp/tests_to_run) ; do
@@ -674,18 +720,23 @@ jobs:
         with:
           payload-file: ${{ env.MESSAGE_PAYLOAD_FILE }}
           webhook: ${{ secrets.WEBHOOK_FLAKY_TESTS }}
+      - name: Early terminate workflow
+        if: ${{ failure() }}
+        uses: ./.github/actions/early-terminator
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
 
   forge-test:
-    runs-on: ubuntu-latest-xl
+    runs-on: ubuntu-20.04-xl
     timeout-minutes: 40
     needs: prepare
     if: ${{ needs.prepare.outputs.test-rust == 'true' && needs.prepare.outputs.test-compatibility == 'true' }}
     container:
-      image: diem/build_environment:${{ needs.prepare.outputs.changes-target-branch }}
+      image: ghcr.io/diem/diem_build_environment:${{ needs.prepare.outputs.changes-target-branch }}
       volumes:
         - "${{github.workspace}}:/opt/git/diem"
     steps:
-      - uses: actions/checkout@v2.3.4
+      - uses: actions/checkout@v2.4.0
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0 #get all the history!!!
@@ -697,16 +748,21 @@ jobs:
           restore-keys: "crates-${{ runner.os }}"
       - name: compatibility tests
         run: |
-          cargo test -p testcases --test forge-local-compatibility
+          $pre_command && cargo test -p testcases --test forge-local-compatibility
       - uses: ./.github/actions/build-teardown
+      - name: Early terminate workflow
+        if: ${{ failure() }}
+        uses: ./.github/actions/early-terminator
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
 
   docker-compose-test:
-    runs-on: ubuntu-latest-xl
-    timeout-minutes: 30
+    runs-on: ubuntu-20.04-xl
+    timeout-minutes: 40
     needs: prepare
     if: ${{ needs.prepare.outputs.test-docker-compose == 'true' }}
     steps:
-      - uses: actions/checkout@v2.3.4
+      - uses: actions/checkout@v2.4.0
         with:
           ref: ${{ github.event.pull_request.head.sha }}
       - name: install expect
@@ -729,28 +785,32 @@ jobs:
         env:
           JSON_RPC_URL: "http://127.0.0.1:8080"
           FAUCET_URL: "http://127.0.0.1:8000"
-      - uses: actions/checkout@v2.3.4
+      - uses: actions/checkout@v2.4.0
         with:
-          ref: diem-core-v1.2.0
-      # Unfortunately this is spelled wrong in the release branch
-      - name: run sdk-compatability tests from release
-        run: cd sdk/compatability && cargo test -- --include-ignored
+          ref: diem-core-v1.4.1
+      - name: run sdk-compatibility tests from release
+        run: cd sdk/compatibility && cargo test -- --include-ignored
         env:
           JSON_RPC_URL: "http://127.0.0.1:8080"
           FAUCET_URL: "http://127.0.0.1:8000"
       - uses: ./.github/actions/build-teardown
+      - name: Early terminate workflow
+        if: ${{ failure() }}
+        uses: ./.github/actions/early-terminator
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
 
   crypto-unit-test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    runs-on: ubuntu-20.04
+    timeout-minutes: 60
     needs: prepare
     if: ${{ needs.prepare.outputs.test-rust == 'true' }}
     container:
-      image: diem/build_environment:${{ needs.prepare.outputs.changes-target-branch }}
+      image: ghcr.io/diem/diem_build_environment:${{ needs.prepare.outputs.changes-target-branch }}
       volumes:
         - "${{github.workspace}}:/opt/git/diem"
     steps:
-      - uses: actions/checkout@v2.3.4
+      - uses: actions/checkout@v2.4.0
         with:
           ref: ${{ github.event.pull_request.head.sha }}
       - uses: ./.github/actions/build-setup
@@ -759,46 +819,56 @@ jobs:
           key: ${{ needs.prepare.outputs.changes-target-branch }}
       - name: run crypto unit tests
         run: |
-          cd /opt/git/diem/crypto/crypto
-          cargo test --features='u64' --no-default-features
-          cargo test --features='u32' --no-default-features
+          $pre_command && cd crates/diem-crypto && cargo test --features='u64' --no-default-features
+          $pre_command && cd crates/diem-crypto && cargo test --features='u32' --no-default-features
       - uses: ./.github/actions/build-teardown
+      - name: Early terminate workflow
+        if: ${{ failure() }}
+        uses: ./.github/actions/early-terminator
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
 
-  coverage-unit-test:
-    runs-on: ubuntu-latest-xl
-    timeout-minutes: 10
-    needs: prepare
-    if: ${{ needs.prepare.outputs.test-test-coverage == 'true' }}
-    container:
-      image: diem/build_environment:${{ needs.prepare.outputs.changes-target-branch }}
-      volumes:
-        - "${{github.workspace}}:/opt/git/diem"
-    steps:
-      - uses: actions/checkout@v2.3.4
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-      - uses: ./.github/actions/build-setup
-      - uses: Swatinem/rust-cache@c5ed9ba6b7e1bb8aff90d43acd2f0af4990fa57c
-        with:
-          key: ${{ needs.prepare.outputs.changes-target-branch }}
-      - name: run coverage tests and verify coverage is calculated.
-        run: |
-          cargo xtest --html-cov-dir=/tmp/results/ -p diem-logger
-          export line_coverage=$( cat /tmp/results/index.html | grep '<abbr' | head -1 | sed 's/<[^>]*>//g' |  sed 's/\..*//g' | sed 's/[[:blank:]]//g' )
-          echo Line Coverage: $line_coverage
-          if (( line_coverage < 80 )); then
-            echo Coverage appears to be broken, diem/logger should report more than 80% line coverage.
-            exit 1;
-          fi
-      - uses: ./.github/actions/build-teardown
+  # Disabling temporarily since code coverage is currently broken with the latest rust release
+  # coverage-unit-test:
+  #   runs-on: ubuntu-20.04-xl
+  #   timeout-minutes: 30
+  #   needs: prepare
+  #   if: ${{ needs.prepare.outputs.test-test-coverage == 'true' }}
+  #   container:
+  #     image: ghcr.io/diem/diem_build_environment:${{ needs.prepare.outputs.changes-target-branch }}
+  #     volumes:
+  #       - "${{github.workspace}}:/opt/git/diem"
+  #   steps:
+  #     - uses: actions/checkout@v2.4.0
+  #       with:
+  #         ref: ${{ github.event.pull_request.head.sha }}
+  #     - uses: ./.github/actions/build-setup
+  #     - uses: Swatinem/rust-cache@c5ed9ba6b7e1bb8aff90d43acd2f0af4990fa57c
+  #       with:
+  #         key: ${{ needs.prepare.outputs.changes-target-branch }}
+  #     - name: run coverage tests and verify coverage is calculated.
+  #       run: |
+  #         cargo xtest --html-cov-dir=/tmp/results/ -p diem-logger
+  #         export line_coverage=$( cat /tmp/results/index.html | grep '<abbr' | head -1 | sed 's/<[^>]*>//g' |  sed 's/\..*//g' | sed 's/[[:blank:]]//g' )
+  #         echo Line Coverage: $line_coverage
+  #         if (( line_coverage < 80 )); then
+  #           echo Coverage appears to be broken, diem/logger should report more than 80% line coverage.
+  #           exit 1;
+  #         fi
+  #     - uses: ./.github/actions/build-teardown
+  #     - name: Early terminate workflow
+  #       if: ${{ failure() }}
+  #       uses: ./.github/actions/early-terminator
+  #       with:
+  #         github-token: ${{secrets.GITHUB_TOKEN}}
 
   helm-test:
-    runs-on: ubuntu-latest-xl
+    runs-on: ubuntu-20.04-xl
     timeout-minutes: 20
     needs: prepare
     if: ${{ needs.prepare.outputs.test-helm == 'true' }}
     steps:
-      - uses: actions/checkout@v2.3.4
+      - uses: actions/checkout@v2.4.0
         with:
           ref: ${{ github.event.pull_request.head.sha }}
       - name: Check machine details for minikube
@@ -860,19 +930,40 @@ jobs:
         if: ${{ always() }}
         run: minikube delete
       - uses: ./.github/actions/build-teardown
+      - name: Early terminate workflow
+        if: ${{ failure() }}
+        uses: ./.github/actions/early-terminator
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
 
-  # Compile (but don't run) the benchmarks, to insulate against bit rot
-  build-benchmarks:
-    runs-on: ubuntu-latest-xl
-    timeout-minutes: 30
+  api_spec_test:
+    name: API specification test
+    runs-on: ubuntu-20.04
     needs: prepare
-    if: ${{ needs.prepare.outputs.test-rust == 'true' }}
+    if: ${{ needs.prepare.outputs.test-api-spec == 'true' }}
     container:
-      image: diem/build_environment:${{ needs.prepare.outputs.changes-target-branch }}
+      image: ghcr.io/diem/diem_build_environment:${{ needs.prepare.outputs.changes-target-branch }}
       volumes:
         - "${{github.workspace}}:/opt/git/diem"
     steps:
       - uses: actions/checkout@v2.3.4
+      - uses: ./.github/actions/build-setup
+      - name:
+        working-directory: api
+        run: make test
+
+  # Compile (but don't run) the benchmarks, to insulate against bit rot
+  build-benchmarks:
+    runs-on: ubuntu-20.04-xl
+    timeout-minutes: 30
+    needs: prepare
+    if: ${{ needs.prepare.outputs.test-rust == 'true' }}
+    container:
+      image: ghcr.io/diem/diem_build_environment:${{ needs.prepare.outputs.changes-target-branch }}
+      volumes:
+        - "${{github.workspace}}:/opt/git/diem"
+    steps:
+      - uses: actions/checkout@v2.4.0
         with:
           ref: ${{ github.event.pull_request.head.sha }}
       - uses: ./.github/actions/build-setup
@@ -884,35 +975,44 @@ jobs:
       - name: build benchmarks
         run: cargo x bench --no-run
       - uses: ./.github/actions/build-teardown
+      - name: Early terminate workflow
+        if: ${{ failure() }}
+        uses: ./.github/actions/early-terminator
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
 
   build-dev:
-    runs-on: ubuntu-latest-xl
+    runs-on: ubuntu-20.04-xl
     timeout-minutes: 30
     needs: prepare
     if: ${{ needs.prepare.outputs.test-rust == 'true' }}
     container:
-      image: diem/build_environment:${{ needs.prepare.outputs.changes-target-branch }}
+      image: ghcr.io/diem/diem_build_environment:${{ needs.prepare.outputs.changes-target-branch }}
       volumes:
         - "${{github.workspace}}:/opt/git/diem"
     steps:
-      - uses: actions/checkout@v2.3.4
+      - uses: actions/checkout@v2.4.0
         with:
           ref: ${{ github.event.pull_request.head.sha }}
       - uses: ./.github/actions/build-setup
       - uses: Swatinem/rust-cache@c5ed9ba6b7e1bb8aff90d43acd2f0af4990fa57c
         with:
           key: ${{ needs.prepare.outputs.changes-target-branch }}
-      - run: cd /opt/git/diem/ && cargo xcheck -j ${max_threads} --members production
-      - run: cd /opt/git/diem/ && cargo xcheck -j ${max_threads} --workspace --all-targets
+      - run: $pre_command && cargo xcheck -j ${max_threads} --members production
+      - run: $pre_command && cargo xcheck -j ${max_threads} --workspace --all-targets
       - run: |
-          cd /opt/git/diem
-          rustup target add powerpc-unknown-linux-gnu
-          cargo xcheck -j ${max_threads} -p diem-transaction-builder -p move-vm-types --target powerpc-unknown-linux-gnu
+          $pre_command && rustup target add powerpc-unknown-linux-gnu
+          $pre_command && cargo xcheck -j ${max_threads} -p diem-transaction-builder -p move-vm-types --target powerpc-unknown-linux-gnu
       - uses: ./.github/actions/build-teardown
+      - name: Early terminate workflow
+        if: ${{ failure() }}
+        uses: ./.github/actions/early-terminator
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
 
   perf-benchmarks:
     name: run-perf-benchmarks
-    runs-on: ubuntu-latest-xl
+    runs-on: ubuntu-20.04-xl
     timeout-minutes: 30
     needs:
       - prepare
@@ -920,7 +1020,7 @@ jobs:
     env:
       CRITERION_HOME: /tmp/benches
     steps:
-      - uses: actions/checkout@v2.3.4
+      - uses: actions/checkout@v2.4.0
         with:
           ref: ${{ github.event.pull_request.head.sha }}
       - uses: actions/cache@v2.1.6
@@ -944,14 +1044,19 @@ jobs:
           retention-days: 5
           path: |
             /tmp/benches
+      - name: Early terminate workflow
+        if: ${{ failure() }}
+        uses: ./.github/actions/early-terminator
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
 
   build-move-analyzer-vscode-extension:
     name: Build VS Code extension for move-analyzer
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     needs:
       - prepare
     steps:
-      - uses: actions/checkout@v2.3.4
+      - uses: actions/checkout@v2.4.0
         with:
           ref: ${{ github.event.pull_request.head.sha }}
       - name: Use Node.js 14
@@ -982,14 +1087,19 @@ jobs:
         with:
           name: move-analyzer-vscode-extension
           path: language/move-analyzer/editors/code/move-analyzer.vsix
+      - name: Early terminate workflow
+        if: ${{ failure() }}
+        uses: ./.github/actions/early-terminator
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
 
   developers-site:
     name: run-developer-site-build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     if: ${{ needs.prepare.outputs.test-website-build == 'true' }}
     steps:
       # Checks-out the Diem website repository under $GITHUB_WORKSPACE, so job can access it
-      - uses: actions/checkout@v2.3.4
+      - uses: actions/checkout@v2.4.0
         with:
           ref: ${{ github.event.pull_request.head.sha }}
       - uses: actions/cache@v2.1.6
@@ -1016,6 +1126,11 @@ jobs:
           # or python docs `-p` on CI checks until we resolve the best way to
           # build them for deployment
           ./scripts/build_docs.sh -b
+      - name: Early terminate workflow
+        if: ${{ failure() }}
+        uses: ./.github/actions/early-terminator
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
 
   land-blocking-test-forge:
     name: Run land blocking test in Forge
@@ -1026,7 +1141,7 @@ jobs:
       forge-result: ${{ steps.post-test-result.outputs.forge-result }}
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v2.3.4
+      - uses: actions/checkout@v2.4.0
         with:
           # This ensures that the tip of the PR is checked out instead of the merge between the base ref and the tip
           # On `push` this value will be empty and will "do-the-right-thing"
@@ -1146,12 +1261,17 @@ jobs:
           else
             echo "::set-output name=forge-result::success";
           fi
+      - name: Early terminate workflow
+        if: ${{ failure() }}
+        uses: ./.github/actions/early-terminator
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
 
   #this is a temp job here to compare lbt signals between Forge and Cluster Test
   #it will be removed once Forge LBT is turned on
   compare_lbt_signals:
     name: compare-lbt_signals
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     timeout-minutes: 2
     #always run this job even if needed jobs failed or are skipped.
     if: ${{ always() && needs.land-blocking-test.result!='skipped' && needs.land-blocking-test-forge.result!='skipped'}}
@@ -1166,7 +1286,7 @@ jobs:
           }}"
           if [[ "$success" != "true" ]]; then
             jq -n \
-              --arg msg "Alert: Two LBT tests results are mismatch." \
+              --arg msg "Alert: Two LBT tests results are mismatch. CT ${{needs.land-blocking-test.result}} != Forge ${{needs.land-blocking-test-forge.outputs.forge-result}}" \
               --arg url "https://github.com/${{ github.repository }}/actions/runs/${{github.run_id}}" \
               --arg pr_url "https://github.com/${{ github.repository }}/pull/${{ needs.prepare.outputs.changes-pull-request-number }}" \
             '{

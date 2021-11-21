@@ -140,9 +140,8 @@ impl TransactionStore {
                         self.index_remove(&txn);
                     }
                 } else {
-                    return MempoolStatus::new(MempoolStatusCode::InvalidUpdate).with_message(
-                        format!("Failed to update gas price to {}", txn.get_gas_price()),
-                    );
+                    return MempoolStatus::new(MempoolStatusCode::InvalidUpdate)
+                        .with_message("Transaction already in mempool".to_string());
                 }
             }
         }
@@ -260,7 +259,7 @@ impl TransactionStore {
     /// (this handles both cases where, (1) txn is first possible txn for an account and (2) the
     /// previous txn is committed).
     /// 2. The txn before this is ready for broadcast but not yet committed.
-    fn check_txn_ready(&mut self, txn: &MempoolTransaction, curr_sequence_number: u64) -> bool {
+    fn check_txn_ready(&self, txn: &MempoolTransaction, curr_sequence_number: u64) -> bool {
         let tx_sequence_number = txn.sequence_info.transaction_sequence_number;
         if tx_sequence_number == curr_sequence_number {
             return true;
@@ -417,7 +416,7 @@ impl TransactionStore {
     /// Read `count` transactions from timeline since `timeline_id`.
     /// Returns block of transactions and new last_timeline_id.
     pub(crate) fn read_timeline(
-        &mut self,
+        &self,
         timeline_id: u64,
         count: usize,
     ) -> (Vec<SignedTransaction>, u64) {
@@ -426,7 +425,7 @@ impl TransactionStore {
         for (address, sequence_number) in self.timeline_index.read_timeline(timeline_id, count) {
             if let Some(txn) = self
                 .transactions
-                .get_mut(&address)
+                .get(&address)
                 .and_then(|txns| txns.get(&sequence_number))
             {
                 batch.push(txn.txn.clone());
@@ -438,7 +437,7 @@ impl TransactionStore {
         (batch, last_timeline_id)
     }
 
-    pub(crate) fn timeline_range(&mut self, start_id: u64, end_id: u64) -> Vec<SignedTransaction> {
+    pub(crate) fn timeline_range(&self, start_id: u64, end_id: u64) -> Vec<SignedTransaction> {
         self.timeline_index
             .timeline_range(start_id, end_id)
             .iter()

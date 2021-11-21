@@ -721,7 +721,7 @@ impl<'env, 'translator, 'module_translator> ExpTranslator<'env, 'translator, 'mo
             EA::Exp_::Name(maccess, type_params) => {
                 self.translate_name(&loc, maccess, type_params.as_deref(), expected_type)
             }
-            EA::Exp_::Call(maccess, type_params, args) => {
+            EA::Exp_::Call(maccess, _is_macro, type_params, args) => {
                 // Need to make a &[&Exp] out of args.
                 let args = args.value.iter().collect_vec();
                 self.translate_fun_call(expected_type, &loc, maccess, type_params.as_deref(), &args)
@@ -1468,6 +1468,25 @@ impl<'env, 'translator, 'module_translator> ExpTranslator<'env, 'translator, 'mo
                     expected_type,
                     "in expression",
                 );
+                // calls to built-in functions might have additional requirements on the types
+                match cand.oper {
+                    Operation::Exists(_) | Operation::Global(_) => {
+                        let ty_inst = &instantiation[0];
+                        if !matches!(ty_inst, Type::Struct(..)) {
+                            self.error(
+                                loc,
+                                &format!(
+                                    "The type argument to `exists` and `global` must be a struct \
+                                    type but {} is not a struct type.",
+                                    ty_inst.display(&self.type_display_context())
+                                ),
+                            );
+                            return self.new_error_exp();
+                        }
+                    }
+                    _ => (),
+                };
+
                 // Construct result.
                 let id = self.new_node_id_with_type_loc(&ty, loc);
                 self.set_node_instantiation(id, instantiation);

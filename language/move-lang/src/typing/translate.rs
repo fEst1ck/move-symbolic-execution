@@ -7,10 +7,12 @@ use super::{
 };
 use crate::{
     diag,
-    diagnostics::codes::*,
+    diagnostics::{codes::*, Diagnostic},
     expansion::ast::{Fields, ModuleIdent, Value_},
     naming::ast::{self as N, TParam, TParamID, Type, TypeName_, Type_},
-    parser::ast::{Ability_, BinOp_, ConstantName, Field, FunctionName, StructName, UnaryOp_, Var},
+    parser::ast::{
+        Ability_, BinOp_, ConstantName, Field, FunctionName, StructName, UnaryOp_, Var, Visibility,
+    },
     shared::{unique_map::UniqueMap, *},
     typing::ast as T,
     FullyCompiledProgram,
@@ -115,8 +117,18 @@ fn script(context: &mut Context, nscript: N::Script) -> T::Script {
     }
 }
 
+#[derive(Clone, Copy)]
+// enum representing the case for functions that are invocable by the VM script API
+enum Invocable {
+    // a normal script block
+    Script,
+    // a public(script) function in a module
+    PublicScript,
+}
+
 fn check_primitive_script_arg(
     context: &mut Context,
+    case: Invocable,
     mloc: Loc,
     seen_non_signer: &mut bool,
     ty: &Type,
@@ -127,6 +139,10 @@ fn check_primitive_script_arg(
             "Invalid parameter for script function '{}'",
             current_function
         )
+    };
+    let code = match case {
+        Invocable::Script => TypeSafety::ScriptSignature,
+        Invocable::PublicScript => TypeSafety::NonInvocablePublicScript,
     };
 
     let loc = ty.loc;
@@ -145,9 +161,7 @@ fn check_primitive_script_arg(
                  non-signer types",
                 core::error_format(&signer, &Subst::empty()),
             );
-            context
-                .env
-                .add_diag(diag!(TypeSafety::ScriptSignature, (mloc, msg), (loc, tmsg)));
+            context.env.add_diag(diag!(code, (mloc, msg), (loc, tmsg)));
         }
 
         return;
@@ -155,7 +169,7 @@ fn check_primitive_script_arg(
         *seen_non_signer = true;
     }
 
-    check_valid_constant::signature(context, mloc, mk_msg, TypeSafety::ScriptSignature, ty);
+    check_valid_constant::signature(context, mloc, mk_msg, code, ty);
 }
 
 //**************************************************************************************************
@@ -179,27 +193,58 @@ fn function(
     assert!(context.constraints.is_empty());
     context.reset_for_module_item();
     context.current_function = Some(name);
+    let invocable_opt = match (is_script, &visibility) {
+        (true, _) => Some(Invocable::Script),
+        (_, Visibility::Script(_)) => Some(Invocable::PublicScript),
+        _ => None,
+    };
 
     function_signature(context, &signature);
-    if is_script {
+    if let Some(case) = invocable_opt {
         let mut seen_non_signer = false;
         for (_, param_ty) in signature.parameters.iter() {
-            check_primitive_script_arg(context, loc, &mut seen_non_signer, param_ty);
+            check_primitive_script_arg(context, case, loc, &mut seen_non_signer, param_ty);
         }
-        subtype(
-            context,
-            loc,
-            || {
-                let tu = core::error_format_(&Type_::Unit, &Subst::empty());
-                format!(
-                    "Invalid 'script' function return type. The function entry point to a \
-                     'script' must have the return type {}",
-                    tu
-                )
-            },
-            signature.return_type.clone(),
-            sp(loc, Type_::Unit),
-        );
+        match case {
+            Invocable::Script => {
+                subtype(
+                    context,
+                    loc,
+                    || {
+                        let tu = core::error_format_(&Type_::Unit, &Subst::empty());
+                        format!(
+                            "Invalid 'script' function return type. The function entry point to a \
+                             'script' must have the return type {}",
+                            tu
+                        )
+                    },
+                    signature.return_type.clone(),
+                    sp(loc, Type_::Unit),
+                );
+            }
+            Invocable::PublicScript => {
+                let res =
+                    subtype_no_report(context, signature.return_type.clone(), sp(loc, Type_::Unit));
+                if let Err(err) = res {
+                    let mut diag = typing_error(
+                        context,
+                        true,
+                        loc,
+                        || {
+                            let tu = core::error_format_(&Type_::Unit, &Subst::empty());
+                            format!(
+                                "'public(script)' functions must have a return type of {} in \
+                                 order to be invocable as a script entry point",
+                                tu,
+                            )
+                        },
+                        err,
+                    );
+                    diag = diag.set_code(TypeSafety::NonInvocablePublicScript);
+                    context.env.add_diag(diag)
+                }
+            }
+        }
     }
     expand::function_signature(context, &mut signature);
 
@@ -419,6 +464,14 @@ mod check_valid_constant {
                 exp(context, el);
                 return;
             }
+            E::Vector(_, _, _, eargs) => {
+                exp(context, eargs);
+                return;
+            }
+            E::ExpList(el) => {
+                exp_list(context, el);
+                return;
+            }
 
             //*****************************************
             // Invalid cases
@@ -475,10 +528,6 @@ mod check_valid_constant {
                     exp(context, fe)
                 }
                 "Structs are"
-            }
-            E::ExpList(el) => {
-                exp_list(context, el);
-                "Expression lists are"
             }
             E::Constant(_, _) => "Other constants are",
         };
@@ -741,7 +790,8 @@ fn check_non_phantom_param_usage(
         }
         Some(false) => {
             let msg = format!(
-                "The parameter '{}' is only used as an argument to phantom parameters. Consider adding a phantom declaration here",
+                "The parameter '{}' is only used as an argument to phantom parameters. Consider \
+                 adding a phantom declaration here",
                 name
             );
             context
@@ -771,7 +821,7 @@ fn typing_error<T: ToString, F: FnOnce() -> T>(
     loc: Loc,
     mk_msg: F,
     e: core::TypingError,
-) {
+) -> Diagnostic {
     use super::core::TypingError::*;
     let msg = mk_msg().to_string();
     let subst = &context.subst;
@@ -845,7 +895,7 @@ fn typing_error<T: ToString, F: FnOnce() -> T>(
             (rloc, "Unable to infer the type. Recursive type found."),
         ),
     };
-    context.env.add_diag(diag)
+    diag
 }
 
 fn subtype_no_report(
@@ -875,7 +925,8 @@ fn subtype_impl<T: ToString, F: FnOnce() -> T>(
     match core::subtype(subst.clone(), &lhs, &rhs) {
         Err(e) => {
             context.subst = subst;
-            typing_error(context, /* from_subtype */ true, loc, msg, e);
+            let diag = typing_error(context, /* from_subtype */ true, loc, msg, e);
+            context.env.add_diag(diag);
             Err(rhs)
         }
         Ok((next_subst, ty)) => {
@@ -924,7 +975,8 @@ fn join_opt<T: ToString, F: FnOnce() -> T>(
     match core::join(subst.clone(), &t1, &t2) {
         Err(e) => {
             context.subst = subst;
-            typing_error(context, /* from_subtype */ false, loc, msg, e);
+            let diag = typing_error(context, /* from_subtype */ false, loc, msg, e);
+            context.env.add_diag(diag);
             None
         }
         Ok((next_subst, ty)) => {
@@ -1262,6 +1314,10 @@ fn exp_inner(context: &mut Context, sp!(eloc, ne_): N::Exp) -> T::Exp {
         NE::Builtin(b, sp!(argloc, nargs_)) => {
             let args = exp_vec(context, nargs_);
             builtin_call(context, eloc, b, argloc, args)
+        }
+        NE::Vector(vec_loc, ty_opt, sp!(argloc, nargs_)) => {
+            let args_ = exp_vec(context, nargs_);
+            vector_pack(context, eloc, vec_loc, ty_opt, argloc, args_)
         }
 
         NE::IfElse(nb, nt, nf) => {
@@ -2172,8 +2228,8 @@ fn builtin_call(
             params_ty = vec![sp(bloc, Type_::Ref(true, Box::new(ty_arg.clone())))];
             ret_ty = sp(loc, Type_::Ref(false, Box::new(ty_arg)));
         }
-        NB::Assert => {
-            b_ = TB::Assert;
+        NB::Assert(is_macro) => {
+            b_ = TB::Assert(is_macro);
             params_ty = vec![Type_::bool(bloc), Type_::u64(bloc)];
             ret_ty = sp(loc, Type_::Unit);
         }
@@ -2198,6 +2254,56 @@ fn builtin_call(
     }
     let call = T::UnannotatedExp_::Builtin(Box::new(sp(bloc, b_)), arguments);
     (ret_ty, call)
+}
+
+fn vector_pack(
+    context: &mut Context,
+    eloc: Loc,
+    vec_loc: Loc,
+    ty_arg_opt: Option<Type>,
+    argloc: Loc,
+    args_: Vec<T::Exp>,
+) -> (Type, T::UnannotatedExp_) {
+    let arity = args_.len();
+    let (eargs, args_ty) = call_args(
+        context,
+        eloc,
+        || -> String { panic!("ICE. could not create vector args") },
+        arity,
+        argloc,
+        args_,
+    );
+    let mut inferred_vec_ty_arg = core::make_tvar(context, eloc);
+    for arg_ty in args_ty {
+        // TODO this could be improved... A LOT
+        // this ends up generating a new tvar chain for each element in the vector
+        // which ends up being n^2 chains
+        inferred_vec_ty_arg = join(
+            context,
+            eloc,
+            || "Invalid 'vector' instantiation. Incompatible argument",
+            inferred_vec_ty_arg,
+            arg_ty,
+        );
+    }
+    let vec_ty_arg = match ty_arg_opt {
+        None => inferred_vec_ty_arg,
+        Some(ty_arg) => {
+            let ty_arg = core::instantiate(context, ty_arg);
+            subtype(
+                context,
+                eloc,
+                || "Invalid 'vector' instantiation. Invalid argument type",
+                inferred_vec_ty_arg,
+                ty_arg.clone(),
+            );
+            ty_arg
+        }
+    };
+    context.add_base_type_constraint(eloc, "Invalid 'vector' type", vec_ty_arg.clone());
+    let ty_vec = Type_::vector(eloc, vec_ty_arg.clone());
+    let e_ = T::UnannotatedExp_::Vector(vec_loc, arity, Box::new(vec_ty_arg), eargs);
+    (ty_vec, e_)
 }
 
 fn call_args<S: std::fmt::Display, F: Fn() -> S>(

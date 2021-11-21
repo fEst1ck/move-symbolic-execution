@@ -22,13 +22,14 @@ pub use hash::HashValue;
 pub use ledger_info::LedgerInfo;
 pub use move_types::{
     HexEncodedBytes, MoveFunction, MoveModule, MoveModuleBytecode, MoveModuleId, MoveResource,
-    MoveResourceType, MoveScriptBytecode, MoveStructTag, MoveStructValue, MoveType, MoveValue,
+    MoveScriptBytecode, MoveStructTag, MoveStructValue, MoveType, MoveValue, ScriptFunctionId,
     U128, U64,
 };
 pub use response::{Response, X_DIEM_CHAIN_ID, X_DIEM_LEDGER_TIMESTAMP, X_DIEM_LEDGER_VERSION};
 pub use transaction::{
-    BlockMetadataTransaction, Event, GenesisTransaction, PendingTransaction, ScriptFunctionPayload,
-    ScriptPayload, Transaction, TransactionData, TransactionId, TransactionOnChainData,
-    TransactionPayload, TransactionSigningMessage, UserTransaction, UserTransactionRequest,
-    WriteSetChange, WriteSetPayload,
+    BlockMetadataTransaction, DirectWriteSet, Event, GenesisTransaction, PendingTransaction,
+    ScriptFunctionPayload, ScriptPayload, ScriptWriteSet, Transaction, TransactionData,
+    TransactionId, TransactionInfo, TransactionOnChainData, TransactionPayload,
+    TransactionSigningMessage, UserTransaction, UserTransactionRequest, WriteSet, WriteSetChange,
+    WriteSetPayload,
 };

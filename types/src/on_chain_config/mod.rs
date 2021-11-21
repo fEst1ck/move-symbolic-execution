@@ -19,16 +19,18 @@ use std::{collections::HashMap, fmt, sync::Arc};
 
 mod consensus_config;
 mod diem_version;
+mod parallel_execution_config;
 mod registered_currencies;
 mod validator_set;
 mod vm_config;
 mod vm_publishing_option;
 
 pub use self::{
-    consensus_config::{ConsensusConfigV1, OnChainConsensusConfig},
+    consensus_config::{ConsensusConfigV1, ConsensusConfigV2, OnChainConsensusConfig},
     diem_version::{
         DiemVersion, DIEM_MAX_KNOWN_VERSION, DIEM_VERSION_2, DIEM_VERSION_3, DIEM_VERSION_4,
     },
+    parallel_execution_config::{ParallelExecutionConfig, ReadWriteSetAnalysis},
     registered_currencies::RegisteredCurrencies,
     validator_set::ValidatorSet,
     vm_config::VMConfig,
@@ -75,6 +77,7 @@ pub const ON_CHAIN_CONFIG_REGISTRY: &[ConfigID] = &[
     ValidatorSet::CONFIG_ID,
     RegisteredCurrencies::CONFIG_ID,
     OnChainConsensusConfig::CONFIG_ID,
+    ParallelExecutionConfig::CONFIG_ID,
 ];
 
 #[derive(Clone, Debug, PartialEq)]

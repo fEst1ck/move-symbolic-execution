@@ -93,22 +93,24 @@ Demo::f1: [
   entrypoint {
     assume @0 = [
       <> -> [
-        <bool, *error*>
-        <u64, *error*>
+        <bool, #0>
+        <u64, #1>
       ]
     ]
   }
+  0: $t1 := exists<Demo::S1<bool>>($t0) {}
   10: write_back[Demo::S1<bool>@]($t3) {
     assert @0 = [
       <> -> [
-        <bool, *error*>
+        <bool, #0>
       ]
     ]
   }
+  12: $t6 := exists<Demo::S1<u64>>($t0) {}
   22: write_back[Demo::S1<u64>@]($t8) {
     assert @0 = [
       <> -> [
-        <u64, *error*>
+        <u64, #1>
       ]
     ]
   }

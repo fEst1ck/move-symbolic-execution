@@ -71,21 +71,6 @@ impl ExecutorProxy {
             event_subscription_service,
         }
     }
-
-    /// Notify all reconfiguration subscribers of the initial on-chain configuration
-    /// values.
-    pub(crate) fn notify_initial_configs(&mut self) -> Result<(), Error> {
-        match (&*self.storage).fetch_synced_version() {
-            Ok(synced_version) => self
-                .event_subscription_service
-                .notify_initial_configs(synced_version)
-                .map_err(|error| error.into()),
-            Err(error) => Err(Error::UnexpectedError(format!(
-                "Failed to fetch storage synced version: {}",
-                error
-            ))),
-        }
-    }
 }
 
 impl ExecutorProxyTrait for ExecutorProxy {
@@ -240,6 +225,7 @@ mod tests {
         contract_event::ContractEvent,
         event::EventKey,
         ledger_info::LedgerInfoWithSignatures,
+        move_resource::MoveStorage,
         on_chain_config::{
             ConsensusConfigV1, DiemVersion, OnChainConfig, OnChainConsensusConfig,
             ON_CHAIN_CONFIG_REGISTRY,
@@ -271,7 +257,7 @@ mod tests {
         // Create a dummy prologue transaction that will bump the timer, and update the validator set
         let validator_account = validators[0].data.address;
         let dummy_txn = create_dummy_transaction(1, validator_account);
-        let reconfig_txn = create_new_update_diem_version_transaction(1);
+        let reconfig_txn = create_new_update_diem_version_transaction(0);
 
         // Execute and commit the block
         let block = vec![dummy_txn, reconfig_txn];
@@ -295,7 +281,7 @@ mod tests {
         // Create a dummy prologue transaction that will bump the timer, and update the Diem version
         let validator_account = validators[0].data.address;
         let dummy_txn = create_dummy_transaction(1, validator_account);
-        let reconfig_txn = create_new_update_diem_version_transaction(1);
+        let reconfig_txn = create_new_update_diem_version_transaction(0);
 
         // Execute and commit the reconfig block
         let block = vec![dummy_txn, reconfig_txn];
@@ -316,10 +302,10 @@ mod tests {
         // Create a dummy prologue transaction that will bump the timer, and update the Diem version
         let validator_account = validators[0].data.address;
         let dummy_txn = create_dummy_transaction(1, validator_account);
-        let reconfig_txn = create_new_update_diem_version_transaction(1);
+        let reconfig_txn = create_new_update_diem_version_transaction(0);
 
         // Give the validator some money so it can send a rotation tx and rotate the validator's consensus key.
-        let money_txn = create_transfer_to_validator_transaction(validator_account, 2);
+        let money_txn = create_transfer_to_validator_transaction(validator_account, 1);
         let rotation_txn = create_consensus_key_rotation_transaction(&validators[0], 0);
 
         // Execute and commit the reconfig block
@@ -420,7 +406,7 @@ mod tests {
         // Create a dummy prologue transaction that will bump the timer, and update the Diem version
         let validator_account = validators[0].data.address;
         let dummy_txn = create_dummy_transaction(1, validator_account);
-        let allowlist_txn = create_new_update_diem_version_transaction(1);
+        let allowlist_txn = create_new_update_diem_version_transaction(0);
 
         // Execute and commit the reconfig block
         let block = vec![dummy_txn, allowlist_txn];
@@ -443,7 +429,7 @@ mod tests {
         // Create a dummy prologue transaction that will bump the timer and update the Diem version
         let validator_account = validators[0].data.address;
         let dummy_txn_1 = create_dummy_transaction(1, validator_account);
-        let reconfig_txn = create_new_update_diem_version_transaction(1);
+        let reconfig_txn = create_new_update_diem_version_transaction(0);
 
         // Execute and commit the reconfig block
         let block = vec![dummy_txn_1.clone(), reconfig_txn.clone()];
@@ -451,7 +437,7 @@ mod tests {
 
         // Give the validator some money so it can send a rotation tx, create another dummy prologue
         // to bump the timer and rotate the validator's consensus key.
-        let money_txn = create_transfer_to_validator_transaction(validator_account, 2);
+        let money_txn = create_transfer_to_validator_transaction(validator_account, 1);
         let dummy_txn_2 = create_dummy_transaction(2, validator_account);
         let rotation_txn = create_consensus_key_rotation_transaction(&validators[0], 0);
 
@@ -499,7 +485,7 @@ mod tests {
         // Create a dummy prologue transaction that will bump the timer and update the Diem version
         let validator_account = validators[0].data.address;
         let dummy_txn = create_dummy_transaction(1, validator_account);
-        let reconfig_txn = create_new_update_diem_version_transaction(1);
+        let reconfig_txn = create_new_update_diem_version_transaction(0);
 
         // Execute and commit the reconfig block
         let block = vec![dummy_txn, reconfig_txn];
@@ -513,7 +499,7 @@ mod tests {
 
         // Give the validator some money so it can send a rotation tx, create another dummy prologue
         // to bump the timer and rotate the validator's consensus key.
-        let money_txn = create_transfer_to_validator_transaction(validator_account, 2);
+        let money_txn = create_transfer_to_validator_transaction(validator_account, 1);
         let dummy_txn = create_dummy_transaction(2, validator_account);
         let rotation_txn = create_consensus_key_rotation_transaction(&validators[0], 0);
 
@@ -542,7 +528,7 @@ mod tests {
         // Create a dummy prologue transaction that will bump the timer, and update the Diem version
         let validator_account = validators[0].data.address;
         let dummy_txn = create_dummy_transaction(1, validator_account);
-        let update_txn = create_new_update_consensus_config_transaction(1);
+        let update_txn = create_new_update_consensus_config_transaction(0);
 
         // Execute and commit the reconfig block
         let block = vec![dummy_txn, update_txn];
@@ -585,11 +571,17 @@ mod tests {
             .subscribe_to_reconfigurations()
             .unwrap();
 
-        // Initialize the executor proxy and verify that the node doesn't panic
+        // Initialize the configs and verify that the node doesn't panic
         // (even though it can't find the TestOnChainConfig on the blockchain!).
+        let storage: Arc<dyn DbReader<DpnProto>> = db.clone();
+        let synced_version = (&*storage).fetch_synced_version().unwrap();
+        event_subscription_service
+            .notify_initial_configs(synced_version)
+            .unwrap();
+
+        // Create an executor
         let chunk_executor = Box::new(Executor::<DpnProto, DiemVM>::new(db_rw.clone()));
         let mut executor_proxy = ExecutorProxy::new(db, chunk_executor, event_subscription_service);
-        executor_proxy.notify_initial_configs().unwrap();
 
         // Verify that the initial configs returned to the subscriber don't contain the unknown on-chain config
         let payload = reconfig_receiver
@@ -603,7 +595,7 @@ mod tests {
         // Create a dummy prologue transaction that will bump the timer, and update the Diem version
         let validator_account = validators[0].data.address;
         let dummy_txn = create_dummy_transaction(1, validator_account);
-        let allowlist_txn = create_new_update_consensus_config_transaction(1);
+        let allowlist_txn = create_new_update_consensus_config_transaction(0);
 
         // Execute and commit the reconfig block
         let mut block_executor = Box::new(Executor::<DpnProto, DiemVM>::new(db_rw));
@@ -646,16 +638,17 @@ mod tests {
         let genesis_txn = Transaction::GenesisTransaction(WriteSetPayload::Direct(genesis));
         assert_ok!(bootstrap_genesis::<DiemVM>(&db_rw, &genesis_txn));
 
-        // Create executor proxy with given subscription
-        let block_executor = Box::new(Executor::<DpnProto, DiemVM>::new(db_rw.clone()));
-        let chunk_executor = Box::new(Executor::<DpnProto, DiemVM>::new(db_rw.clone()));
-        let mut event_subscription_service =
-            EventSubscriptionService::new(ON_CHAIN_CONFIG_REGISTRY, Arc::new(RwLock::new(db_rw)));
+        // Create event subscription service and initialize configs
+        let mut event_subscription_service = EventSubscriptionService::new(
+            ON_CHAIN_CONFIG_REGISTRY,
+            Arc::new(RwLock::new(db_rw.clone())),
+        );
         let mut reconfig_receiver = event_subscription_service
             .subscribe_to_reconfigurations()
             .unwrap();
-        let mut executor_proxy = ExecutorProxy::new(db, chunk_executor, event_subscription_service);
-        assert_ok!(executor_proxy.notify_initial_configs());
+        let storage: Arc<dyn DbReader<DpnProto>> = db.clone();
+        let synced_version = (&*storage).fetch_synced_version().unwrap();
+        assert_ok!(event_subscription_service.notify_initial_configs(synced_version));
 
         if verify_initial_config {
             // Verify initial reconfiguration notification is sent
@@ -664,9 +657,14 @@ mod tests {
                     .select_next_some()
                     .now_or_never()
                     .is_some(),
-                "Expected an initial reconfig notification on executor proxy creation!",
+                "Expected an initial reconfig notification!",
             );
         }
+
+        // Create the executors
+        let block_executor = Box::new(Executor::<DpnProto, DiemVM>::new(db_rw.clone()));
+        let chunk_executor = Box::new(Executor::<DpnProto, DiemVM>::new(db_rw));
+        let executor_proxy = ExecutorProxy::new(db, chunk_executor, event_subscription_service);
 
         (
             validators,

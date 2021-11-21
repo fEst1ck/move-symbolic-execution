@@ -16,18 +16,18 @@ use crate::{
         proposer_election::ProposerElection,
         rotating_proposer_election::{choose_leader, RotatingProposer},
         round_proposer_election::RoundProposer,
-        round_state::{ExponentialTimeInterval, RoundState, RoundStateLogSchema},
+        round_state::{ExponentialTimeInterval, RoundState},
     },
     logging::{LogEvent, LogSchema},
     metrics_safety_rules::MetricsSafetyRules,
     network::{IncomingBlockRetrievalRequest, NetworkReceivers, NetworkSender},
     network_interface::{ConsensusMsg, ConsensusNetworkSender},
     persistent_liveness_storage::{LedgerRecoveryData, PersistentLivenessStorage, RecoveryData},
-    round_manager::{RecoveryManager, RoundManager, UnverifiedEvent, VerifiedEvent},
+    round_manager::{RoundManager, UnverifiedEvent, VerifiedEvent},
     state_replication::{StateComputer, TxnManager},
     util::time_service::TimeService,
 };
-use anyhow::{anyhow, bail, ensure, Context};
+use anyhow::{bail, ensure, Context};
 use channel::{diem_channel, message_queues::QueueStyle};
 use consensus_types::{
     common::{Author, Round},
@@ -50,20 +50,16 @@ use futures::{
         mpsc::{unbounded, UnboundedSender},
         oneshot,
     },
-    select, SinkExt, StreamExt,
+    SinkExt, StreamExt,
 };
 use network::protocols::network::{ApplicationNetworkSender, Event};
 use safety_rules::SafetyRulesManager;
-use std::{cmp::Ordering, sync::Arc, time::Duration};
-
-/// RecoveryManager is used to process events in order to sync up with peer if we can't recover from local consensusdb
-/// RoundManager is used for normal event handling.
-/// We suppress clippy warning here because we expect most of the time we will have RoundManager
-#[allow(clippy::large_enum_variant)]
-pub enum RoundProcessor {
-    Recovery(RecoveryManager),
-    Normal(RoundManager),
-}
+use std::{
+    cmp::Ordering,
+    mem::{discriminant, Discriminant},
+    sync::Arc,
+    time::Duration,
+};
 
 #[allow(clippy::large_enum_variant)]
 pub enum LivenessStorageData {
@@ -93,11 +89,15 @@ pub struct EpochManager {
     commit_state_computer: Arc<dyn StateComputer>,
     storage: Arc<dyn PersistentLivenessStorage>,
     safety_rules_manager: SafetyRulesManager,
-    processor: Option<RoundProcessor>,
     reconfig_events: ReconfigNotificationListener,
     // channels to buffer manager
     buffer_manager_msg_tx: Option<diem_channel::Sender<AccountAddress, VerifiedEvent>>,
     buffer_manager_reset_tx: Option<UnboundedSender<ResetRequest>>,
+    // channels to round manager
+    round_manager_tx: Option<
+        diem_channel::Sender<(Author, Discriminant<VerifiedEvent>), (Author, VerifiedEvent)>,
+    >,
+    epoch_state: Option<EpochState>,
 }
 
 impl EpochManager {
@@ -115,9 +115,6 @@ impl EpochManager {
         let author = node_config.validator_network.as_ref().unwrap().peer_id();
         let config = node_config.consensus.clone();
         let sr_config = &node_config.consensus.safety_rules;
-        if sr_config.decoupled_execution != config.decoupled_execution {
-            panic!("Inconsistent decoupled-execution configuration of consensus and safety-rules\nMake sure consensus.decoupled = safety_rules.decoupled_execution.")
-        }
         let safety_rules_manager = SafetyRulesManager::new(sr_config);
         Self {
             author,
@@ -130,22 +127,18 @@ impl EpochManager {
             commit_state_computer,
             storage,
             safety_rules_manager,
-            processor: None,
             reconfig_events,
             buffer_manager_msg_tx: None,
             buffer_manager_reset_tx: None,
+            round_manager_tx: None,
+            epoch_state: None,
         }
     }
 
     fn epoch_state(&self) -> &EpochState {
-        match self
-            .processor
+        self.epoch_state
             .as_ref()
             .expect("EpochManager not started yet")
-        {
-            RoundProcessor::Normal(p) => p.epoch_state(),
-            RoundProcessor::Recovery(p) => p.epoch_state(),
-        }
     }
 
     fn epoch(&self) -> u64 {
@@ -171,6 +164,7 @@ impl EpochManager {
     fn create_proposer_election(
         &self,
         epoch_state: &EpochState,
+        onchain_config: &OnChainConsensusConfig,
     ) -> Box<dyn ProposerElection + Send + Sync> {
         let proposers = epoch_state
             .verifier
@@ -196,7 +190,12 @@ impl EpochManager {
                     heuristic_config.active_weights,
                     heuristic_config.inactive_weights,
                 ));
-                Box::new(LeaderReputation::new(proposers, backend, heuristic))
+                Box::new(LeaderReputation::new(
+                    proposers,
+                    backend,
+                    heuristic,
+                    onchain_config.leader_reputation_exclude_round(),
+                ))
             }
             ConsensusProposerType::RoundProposer(round_proposers) => {
                 // Hardcoded to the first proposer
@@ -274,7 +273,7 @@ impl EpochManager {
         }
     }
 
-    async fn start_new_epoch(&mut self, proof: EpochChangeProof) -> anyhow::Result<()> {
+    async fn initiate_new_epoch(&mut self, proof: EpochChangeProof) -> anyhow::Result<()> {
         let ledger_info = proof
             .verify(self.epoch_state())
             .context("[EpochManager] Invalid EpochChangeProof")?;
@@ -292,7 +291,7 @@ impl EpochManager {
                 ledger_info
             ))?;
 
-        monitor!("reconfig", self.expect_new_epoch().await);
+        monitor!("reconfig", self.await_reconfig_notification().await);
         Ok(())
     }
 
@@ -316,7 +315,7 @@ impl EpochManager {
         let (commit_msg_tx, commit_msg_rx) = diem_channel::new::<AccountAddress, VerifiedEvent>(
             QueueStyle::FIFO,
             self.config.channel_size,
-            Some(&counters::PENDING_COMMIT_VOTES),
+            Some(&counters::BUFFER_MANAGER_MSGS),
         );
 
         self.buffer_manager_msg_tx = Some(commit_msg_tx);
@@ -344,10 +343,19 @@ impl EpochManager {
     }
 
     async fn shutdown_current_processor(&mut self) {
-        // Release the previous RoundManager, especially the SafetyRule client
-        self.processor = None;
-        self.buffer_manager_msg_tx = None;
+        if self.round_manager_tx.is_some() {
+            // Release the previous RoundManager, especially the SafetyRule client
+            let (ack_tx, ack_rx) = oneshot::channel();
+            let event = VerifiedEvent::Shutdown(ack_tx);
+            self.forward_to_round_manager(self.author, event);
+            ack_rx
+                .await
+                .expect("[EpochManager] Fail to drop round manager");
+        }
+        self.round_manager_tx = None;
+
         // Shutdown the previous buffer manager, to release the SafetyRule client
+        self.buffer_manager_msg_tx = None;
         if let Some(mut tx) = self.buffer_manager_reset_tx.take() {
             let (ack_tx, ack_rx) = oneshot::channel();
             tx.send(ResetRequest {
@@ -396,7 +404,7 @@ impl EpochManager {
             self.create_round_state(self.time_service.clone(), self.timeout_sender.clone());
 
         info!(epoch = epoch, "Create ProposerElection");
-        let proposer_election = self.create_proposer_election(&epoch_state);
+        let proposer_election = self.create_proposer_election(&epoch_state, &onchain_config);
         let network_sender = NetworkSender::new(
             self.author,
             self.network_sender.clone(),
@@ -406,117 +414,60 @@ impl EpochManager {
 
         let safety_rules_container = Arc::new(Mutex::new(safety_rules));
 
-        let mut processor = if self.config.decoupled_execution {
-            let ordering_state_computer = Arc::new(self.spawn_decoupled_execution(
+        let state_computer = if onchain_config.decoupled_execution() {
+            Arc::new(self.spawn_decoupled_execution(
                 safety_rules_container.clone(),
                 epoch_state.verifier.clone(),
-            ));
-
-            info!(epoch = epoch, "Create BlockStore");
-            let block_store = Arc::new(BlockStore::new(
-                Arc::clone(&self.storage),
-                recovery_data,
-                ordering_state_computer,
-                self.config.max_pruned_blocks_in_mem,
-                Arc::clone(&self.time_service),
-                self.config.back_pressure_limit,
-            ));
-
-            info!(epoch = epoch, "Create ProposalGenerator");
-            // txn manager is required both by proposal generator (to pull the proposers)
-            // and by event processor (to update their status).
-            let proposal_generator = ProposalGenerator::new(
-                self.author,
-                block_store.clone(),
-                self.txn_manager.clone(),
-                self.time_service.clone(),
-                self.config.max_block_size,
-            );
-
-            RoundManager::new_with_decoupled_execution(
-                epoch_state,
-                block_store,
-                round_state,
-                proposer_election,
-                proposal_generator,
-                safety_rules_container,
-                network_sender,
-                self.storage.clone(),
-                self.config.sync_only,
-                self.config.back_pressure_limit,
-                onchain_config,
-            )
+            ))
         } else {
-            info!(epoch = epoch, "Create BlockStore");
-            let block_store = Arc::new(BlockStore::new(
-                Arc::clone(&self.storage),
-                recovery_data,
-                self.commit_state_computer.clone(),
-                self.config.max_pruned_blocks_in_mem,
-                Arc::clone(&self.time_service),
-                self.config.back_pressure_limit,
-            ));
-
-            info!(epoch = epoch, "Create ProposalGenerator");
-            // txn manager is required both by proposal generator (to pull the proposers)
-            // and by event processor (to update their status).
-            let proposal_generator = ProposalGenerator::new(
-                self.author,
-                block_store.clone(),
-                self.txn_manager.clone(),
-                self.time_service.clone(),
-                self.config.max_block_size,
-            );
-
-            RoundManager::new(
-                epoch_state,
-                block_store,
-                round_state,
-                proposer_election,
-                proposal_generator,
-                safety_rules_container,
-                network_sender,
-                self.storage.clone(),
-                self.config.sync_only,
-                onchain_config,
-            )
+            self.commit_state_computer.clone()
         };
 
-        processor.start(last_vote).await;
-        self.processor = Some(RoundProcessor::Normal(processor));
-        info!(epoch = epoch, "RoundManager started");
-    }
+        info!(epoch = epoch, "Create BlockStore");
+        let block_store = Arc::new(BlockStore::new(
+            Arc::clone(&self.storage),
+            recovery_data,
+            state_computer,
+            self.config.max_pruned_blocks_in_mem,
+            Arc::clone(&self.time_service),
+            onchain_config.back_pressure_limit(),
+        ));
 
-    // Depending on what data we can extract from consensusdb, we may or may not have an
-    // event processor at startup. If we need to sync up with peers for blocks to construct
-    // a valid block store, which is required to construct an event processor, we will take
-    // care of the sync up here.
-    async fn start_recovery_manager(
-        &mut self,
-        ledger_recovery_data: LedgerRecoveryData,
-        epoch_state: EpochState,
-        onchain_config: OnChainConsensusConfig,
-    ) {
-        let epoch = epoch_state.epoch;
-        let network_sender = NetworkSender::new(
+        info!(epoch = epoch, "Create ProposalGenerator");
+        // txn manager is required both by proposal generator (to pull the proposers)
+        // and by event processor (to update their status).
+        let proposal_generator = ProposalGenerator::new(
             self.author,
-            self.network_sender.clone(),
-            self.self_sender.clone(),
-            epoch_state.verifier.clone(),
+            block_store.clone(),
+            self.txn_manager.clone(),
+            self.time_service.clone(),
+            self.config.max_block_size,
         );
 
-        self.processor = Some(RoundProcessor::Recovery(RecoveryManager::new(
+        let mut round_manager = RoundManager::new(
             epoch_state,
+            block_store,
+            round_state,
+            proposer_election,
+            proposal_generator,
+            safety_rules_container,
             network_sender,
             self.storage.clone(),
-            self.commit_state_computer.clone(),
-            ledger_recovery_data.commit_round(),
+            self.config.sync_only,
             onchain_config,
-        )));
-        info!(epoch = epoch, "SyncProcessor started");
+        );
+
+        round_manager.init(last_vote).await;
+        let (round_manager_tx, round_manager_rx) = diem_channel::new(
+            QueueStyle::LIFO,
+            1,
+            Some(&counters::ROUND_MANAGER_CHANNEL_MSGS),
+        );
+        self.round_manager_tx = Some(round_manager_tx);
+        tokio::spawn(round_manager.start(round_manager_rx));
     }
 
-    async fn start_processor(&mut self, payload: OnChainConfigPayload) {
+    async fn start_new_epoch(&mut self, payload: OnChainConfigPayload) {
         let validator_set: ValidatorSet = payload
             .get()
             .expect("failed to get ValidatorSet from payload");
@@ -524,19 +475,17 @@ impl EpochManager {
             epoch: payload.epoch(),
             verifier: (&validator_set).into(),
         };
-        let onchain_config: OnChainConsensusConfig = payload.get().unwrap_or_default();
         self.shutdown_current_processor().await;
 
-        match self.storage.start() {
-            LivenessStorageData::RecoveryData(initial_data) => {
-                self.start_round_manager(initial_data, epoch_state, onchain_config)
-                    .await
-            }
-            LivenessStorageData::LedgerRecoveryData(ledger_recovery_data) => {
-                self.start_recovery_manager(ledger_recovery_data, epoch_state, onchain_config)
-                    .await
-            }
-        }
+        let onchain_config: OnChainConsensusConfig = payload.get().unwrap_or_default();
+        self.epoch_state = Some(epoch_state.clone());
+
+        let initial_data = self
+            .storage
+            .start()
+            .expect_recovery_data("Consensusdb is corrupted, need to do a backup and restore");
+        self.start_round_manager(initial_data, epoch_state, onchain_config)
+            .await;
     }
 
     async fn process_message(
@@ -545,7 +494,7 @@ impl EpochManager {
         consensus_msg: ConsensusMsg,
     ) -> anyhow::Result<()> {
         // we can't verify signatures from a different epoch
-        let maybe_unverified_event = self.process_epoch(peer_id, consensus_msg).await?;
+        let maybe_unverified_event = self.check_epoch(peer_id, consensus_msg).await?;
 
         if let Some(unverified_event) = maybe_unverified_event {
             // same epoch -> run well-formedness + signature check
@@ -564,12 +513,12 @@ impl EpochManager {
                 })?;
 
             // process the verified event
-            self.process_event(peer_id, verified_event).await?;
+            self.process_event(peer_id, verified_event)?;
         }
         Ok(())
     }
 
-    async fn process_epoch(
+    async fn check_epoch(
         &mut self,
         peer_id: AccountAddress,
         msg: ConsensusMsg,
@@ -599,7 +548,10 @@ impl EpochManager {
                     "Proof from epoch {}", msg_epoch,
                 );
                 if msg_epoch == self.epoch() {
-                    monitor!("process_epoch_proof", self.start_new_epoch(*proof).await?);
+                    monitor!(
+                        "process_epoch_proof",
+                        self.initiate_new_epoch(*proof).await?
+                    );
                 } else {
                     bail!(
                         "[EpochManager] Unexpected epoch proof from epoch {}, local epoch {}",
@@ -625,85 +577,57 @@ impl EpochManager {
         Ok(None)
     }
 
-    async fn process_event(
+    fn process_event(
         &mut self,
         peer_id: AccountAddress,
         event: VerifiedEvent,
     ) -> anyhow::Result<()> {
-        match self.processor_mut() {
-            RoundProcessor::Recovery(p) => {
-                let recovery_data = match event {
-                    VerifiedEvent::ProposalMsg(proposal) => p.process_proposal_msg(*proposal).await,
-                    VerifiedEvent::VoteMsg(vote) => p.process_vote_msg(*vote).await,
-                    VerifiedEvent::SyncInfo(sync_info) => p.sync_up(&sync_info, peer_id).await,
-                    VerifiedEvent::CommitVote(_) | VerifiedEvent::CommitDecision(_) => {
-                        return Err(anyhow!(
-                            "Ignoring commit vote/decision message during recovery"
-                        ));
-                    }
-                }?;
-                let epoch_state = p.epoch_state().clone();
-                let onchain_config = p.onchain_config().clone();
-                info!("Recovered from SyncProcessor");
-                self.start_round_manager(recovery_data, epoch_state, onchain_config)
-                    .await;
-                Ok(())
+        match event {
+            buffer_manager_event
+            @ (VerifiedEvent::CommitVote(_)
+            | VerifiedEvent::CommitDecision(_)) => {
+                if let Some(sender) = &mut self.buffer_manager_msg_tx {
+                    sender.push(peer_id, buffer_manager_event)?;
+                } else {
+                    bail!("Commit Phase not started but received Commit Message (CommitVote/CommitDecision)");
+                }
             }
-            RoundProcessor::Normal(p) => match event {
-                VerifiedEvent::ProposalMsg(proposal) => {
-                    monitor!("process_proposal", p.process_proposal_msg(*proposal).await)
-                }
-                VerifiedEvent::VoteMsg(vote) => {
-                    monitor!("process_vote", p.process_vote_msg(*vote).await)
-                }
-                VerifiedEvent::SyncInfo(sync_info) => monitor!(
-                    "process_sync_info",
-                    p.process_sync_info_msg(*sync_info, peer_id).await
-                ),
-                verified_event @ VerifiedEvent::CommitVote(_)
-                | verified_event @ VerifiedEvent::CommitDecision(_) => {
-                    if let Some(sender) = &mut self.buffer_manager_msg_tx {
-                        sender.push(peer_id, verified_event).map_err(|err| {
-                            anyhow!("Error in Passing Commit Vote/Decision Message: {}", err)
-                        })
-                    } else {
-                        bail!("Commit Phase not started but received Commit Message (CommitVote/CommitDecision)");
-                    }
-                }
-            },
+            round_manager_event => {
+                self.forward_to_round_manager(peer_id, round_manager_event);
+            }
         }
+        Ok(())
     }
 
-    fn processor_mut(&mut self) -> &mut RoundProcessor {
-        self.processor
+    fn forward_to_round_manager(&mut self, peer_id: Author, event: VerifiedEvent) {
+        let sender = self
+            .round_manager_tx
             .as_mut()
-            .expect("[EpochManager] not started yet")
-    }
-
-    async fn process_block_retrieval(
-        &mut self,
-        request: IncomingBlockRetrievalRequest,
-    ) -> anyhow::Result<()> {
-        match self.processor_mut() {
-            RoundProcessor::Normal(p) => p.process_block_retrieval(request).await,
-            _ => bail!("[EpochManager] RoundManager not started yet"),
+            .expect("RoundManager not started");
+        if let Err(e) = sender.push((peer_id, discriminant(&event)), (peer_id, event)) {
+            error!("Failed to send event to round manager {:?}", e);
         }
     }
 
-    async fn process_local_timeout(&mut self, round: u64) -> anyhow::Result<()> {
-        match self.processor_mut() {
-            RoundProcessor::Normal(p) => p.process_local_timeout(round).await,
-            _ => unreachable!("RoundManager not started yet"),
-        }
+    fn process_block_retrieval(&mut self, request: IncomingBlockRetrievalRequest) {
+        self.forward_to_round_manager(
+            self.author,
+            VerifiedEvent::BlockRetrievalRequest(Box::new(request)),
+        );
     }
 
-    async fn expect_new_epoch(&mut self) {
-        if let Some(reconfig_notification) = self.reconfig_events.next().await {
-            self.start_processor(reconfig_notification.on_chain_configs)
-                .await;
-        } else {
-            panic!("Reconfig sender dropped, unable to start new epoch.");
-        }
+    fn process_local_timeout(&mut self, round: u64) {
+        self.forward_to_round_manager(self.author, VerifiedEvent::LocalTimeout(round));
+    }
+
+    async fn await_reconfig_notification(&mut self) {
+        let reconfig_notification = self
+            .reconfig_events
+            .next()
+            .await
+            .expect("Reconfig sender dropped, unable to start new epoch");
+        self.start_new_epoch(reconfig_notification.on_chain_configs)
+            .await;
     }
 
     pub async fn start(
@@ -712,36 +636,21 @@ impl EpochManager {
         mut network_receivers: NetworkReceivers,
     ) {
         // initial start of the processor
-        self.expect_new_epoch().await;
+        self.await_reconfig_notification().await;
         loop {
-            let result = monitor!(
-                "main_loop",
-                select! {
-                    msg = network_receivers.consensus_messages.select_next_some() => {
-                        let (peer, msg) = (msg.0, msg.1);
-                        monitor!("process_message", self.process_message(peer, msg).await.with_context(|| format!("from peer: {}", peer)))
-                    }
-                    block_retrieval = network_receivers.block_retrieval.select_next_some() => {
-                        monitor!("process_block_retrieval", self.process_block_retrieval(block_retrieval).await)
-                    }
-                    round = round_timeout_sender_rx.select_next_some() => {
-                        monitor!("process_local_timeout", self.process_local_timeout(round).await)
+            tokio::select! {
+                Some((peer, msg)) = network_receivers.consensus_messages.next() => {
+                    if let Err(e) = self.process_message(peer, msg).await {
+                        error!(epoch = self.epoch(), error = ?e, kind = error_kind(&e));
                     }
                 }
-            );
-            let round_state = if let RoundProcessor::Normal(p) = self.processor_mut() {
-                Some(p.round_state())
-            } else {
-                None
-            };
-            match result {
-                Ok(_) => trace!(RoundStateLogSchema::new(round_state)),
-                Err(e) => {
-                    counters::ERROR_COUNT.inc();
-                    error!(error = ?e, kind = error_kind(&e), RoundStateLogSchema::new(round_state));
+                Some(request) = network_receivers.block_retrieval.next() => {
+                    self.process_block_retrieval(request);
+                }
+                Some(round) = round_timeout_sender_rx.next() => {
+                    self.process_local_timeout(round);
                 }
             }
-
             // Continually capture the time of consensus process to ensure that clock skew between
             // validators is reasonable and to find any unusual (possibly byzantine) clock behavior.
             counters::OP_COUNTERS

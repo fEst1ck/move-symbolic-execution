@@ -383,8 +383,14 @@ pub enum Exp_ {
     Copy(Var),
 
     Name(ModuleAccess, Option<Vec<Type>>),
-    Call(ModuleAccess, Option<Vec<Type>>, Spanned<Vec<Exp>>),
+    Call(
+        ModuleAccess,
+        /* is_macro */ bool,
+        Option<Vec<Type>>,
+        Spanned<Vec<Exp>>,
+    ),
     Pack(ModuleAccess, Option<Vec<Type>>, Fields<Exp>),
+    Vector(Loc, Option<Vec<Type>>, Spanned<Vec<Exp>>),
 
     IfElse(Box<Exp>, Box<Exp>, Box<Exp>),
     While(Box<Exp>, Box<Exp>),
@@ -1333,15 +1339,15 @@ impl AstDebug for SequenceItem_ {
 impl AstDebug for Value_ {
     fn ast_debug(&self, w: &mut AstWriter) {
         use Value_ as V;
-        w.write(&match self {
-            V::Address(addr) => format!("@{}", addr),
-            V::InferredNum(u) => format!("{}", u),
-            V::U8(u) => format!("{}u8", u),
-            V::U64(u) => format!("{}u64", u),
-            V::U128(u) => format!("{}u128", u),
-            V::Bool(b) => format!("{}", b),
-            V::Bytearray(v) => format!("{:?}", v),
-        })
+        match self {
+            V::Address(addr) => w.write(&format!("@{}", addr)),
+            V::InferredNum(u) => w.write(&format!("{}", u)),
+            V::U8(u) => w.write(&format!("{}u8", u)),
+            V::U64(u) => w.write(&format!("{}u64", u)),
+            V::U128(u) => w.write(&format!("{}u128", u)),
+            V::Bool(b) => w.write(&format!("{}", b)),
+            V::Bytearray(v) => w.write(&format!("{:?}", v)),
+        }
     }
 }
 
@@ -1364,8 +1370,11 @@ impl AstDebug for Exp_ {
                     w.write(">");
                 }
             }
-            E::Call(ma, tys_opt, sp!(_, rhs)) => {
+            E::Call(ma, is_macro, tys_opt, sp!(_, rhs)) => {
                 ma.ast_debug(w);
+                if *is_macro {
+                    w.write("!");
+                }
                 if let Some(ss) = tys_opt {
                     w.write("<");
                     ss.ast_debug(w);
@@ -1389,6 +1398,17 @@ impl AstDebug for Exp_ {
                     e.ast_debug(w);
                 });
                 w.write("}");
+            }
+            E::Vector(_loc, tys_opt, sp!(_, elems)) => {
+                w.write("vector");
+                if let Some(ss) = tys_opt {
+                    w.write("<");
+                    ss.ast_debug(w);
+                    w.write(">");
+                }
+                w.write("[");
+                w.comma(elems, |w, e| e.ast_debug(w));
+                w.write("]");
             }
             E::IfElse(b, t, f) => {
                 w.write("if (");

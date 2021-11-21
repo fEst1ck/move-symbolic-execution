@@ -15,5 +15,7 @@ pub trait Factory {
         rng: &mut StdRng,
         node_num: NonZeroUsize,
         version: &Version,
+        genesis_version: &Version,
+        genesis_modules: Option<&[Vec<u8>]>,
     ) -> Result<Box<dyn Swarm>>;
 }

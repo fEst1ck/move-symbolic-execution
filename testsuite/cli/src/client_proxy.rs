@@ -7,7 +7,6 @@ use crate::{
     AccountData, AccountStatus,
 };
 use anyhow::{bail, ensure, format_err, Error, Result};
-use compiler::Compiler;
 use diem_client::{
     stream::{StreamingClient, StreamingClientConfig},
     views, StreamResult, WaitForTransactionError,
@@ -33,13 +32,14 @@ use diem_types::{
     transaction::{
         authenticator::AuthenticationKey,
         helpers::{create_unsigned_txn, create_user_txn, TransactionSigner},
-        parse_transaction_argument, ChangeSet, Module, RawTransaction, Script, SignedTransaction,
-        TransactionArgument, TransactionPayload, Version, WriteSetPayload,
+        parse_transaction_argument, ChangeSet, ModuleBundle, RawTransaction, Script,
+        SignedTransaction, TransactionArgument, TransactionPayload, Version, WriteSetPayload,
     },
     waypoint::Waypoint,
     write_set::{WriteOp, WriteSetMut},
 };
 use diem_wallet::{io_utils, WalletLibrary};
+use move_ir_compiler::Compiler;
 use move_vm_test_utils::InMemoryStorage;
 use num_traits::{
     cast::{FromPrimitive, ToPrimitive},
@@ -627,9 +627,7 @@ impl ClientProxy {
             let compiler = Compiler {
                 deps: diem_framework_releases::current_modules().iter().collect(),
             };
-            compiler
-                .into_script_blob("file_name", &code)
-                .expect("Failed to compile")
+            compiler.into_script_blob(&code).expect("Failed to compile")
         };
         match self.diem_root_account {
             Some(_) => self.association_transaction_with_local_diem_root_account(
@@ -1004,7 +1002,7 @@ impl ClientProxy {
         let module_bytes = fs::read(space_delim_strings[2])?;
         self.submit_program(
             space_delim_strings,
-            TransactionPayload::Module(Module::new(module_bytes)),
+            TransactionPayload::ModuleBundle(ModuleBundle::singleton(module_bytes)),
         )
     }
 

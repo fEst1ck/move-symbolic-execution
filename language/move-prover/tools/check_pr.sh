@@ -88,14 +88,14 @@ fi
 
 ARTIFACT_CRATES="\
   $BASE/language/move-stdlib\
-  $BASE/language/diem-framework\
+  $BASE/diem-move/diem-framework\
 "
 
 MOVE_TEST_CRATES="\
   $BASE/language/move-lang/functional-tests\
   $BASE/language/e2e-testsuite\
   $BASE/language/tools/move-cli\
-  $BASE/language/diem-tools/df-cli\
+  $BASE/diem-move/df-cli\
 "
 
 

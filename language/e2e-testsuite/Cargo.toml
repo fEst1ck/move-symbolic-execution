@@ -15,22 +15,24 @@ hex = "0.4.3"
 language-e2e-tests = { path = "../testing-infra/e2e-tests" }
 bytecode-verifier = { path = "../bytecode-verifier" }
 bcs = "0.1.2"
-compiler = { path = "../compiler" }
-diem-keygen = { path = "../diem-tools/diem-keygen" }
-diem-crypto = { path = "../../crypto/crypto", features = ["fuzzing"] }
+diem-keygen = { path = "../../diem-move/diem-keygen" }
+diem-crypto = { path = "../../crates/diem-crypto", features = ["fuzzing"] }
 diem-types = { path = "../../types", features = ["fuzzing"] }
 move-core-types = { path = "../move-core/types" }
+move-ir-compiler = { path = "../move-ir-compiler" }
 move-vm-runtime = { path = "../move-vm/runtime" }
 move-vm-types = { path = "../move-vm/types" }
 diem-transaction-builder = { path = "../../sdk/transaction-builder"}
 move-binary-format = { path = "../move-binary-format" }
-diem-vm = { path = "../diem-vm" }
+diem-vm = { path = "../../diem-move/diem-vm" }
 proptest = "1.0.0"
 diem-logger = { path = "../../common/logger" }
-diem-framework-releases = { path = "../diem-framework/DPN/releases" }
+diem-framework-releases = { path = "../../diem-move/diem-framework/DPN/releases" }
 diem-workspace-hack = { path = "../../common/workspace-hack" }
-diem-writeset-generator = { path = "../diem-tools/writeset-transaction-generator"}
+diem-writeset-generator = { path = "../../diem-move/writeset-transaction-generator"}
 diem-state-view = { path = "../../storage/state-view" }
+read-write-set = { path = "../tools/read-write-set" }
+diem-parallel-executor = { path = "../../diem-move/parallel-executor" }
 
 [features]
 default = ["diem-transaction-builder/fuzzing"]

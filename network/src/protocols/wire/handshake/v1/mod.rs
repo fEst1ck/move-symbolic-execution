@@ -50,6 +50,13 @@ pub enum ProtocolId {
     ConsensusDirectSendJson = 6,
     ConsensusRpcJson = 7,
     StorageServiceRpc = 8,
+    MempoolRpc = 9,
+}
+
+/// The encoding types for Protocols
+enum Encoding {
+    Bcs,
+    Json,
 }
 
 impl ProtocolId {
@@ -65,6 +72,7 @@ impl ProtocolId {
             ConsensusDirectSendJson => "ConsensusDirectSendJson",
             ConsensusRpcJson => "ConsensusRpcJson",
             StorageServiceRpc => "StorageServiceRpc",
+            MempoolRpc => "MempoolRpc",
         }
     }
 
@@ -79,7 +87,16 @@ impl ProtocolId {
             ProtocolId::ConsensusDirectSendJson,
             ProtocolId::ConsensusRpcJson,
             ProtocolId::StorageServiceRpc,
+            ProtocolId::MempoolRpc,
         ]
+    }
+
+    /// How to encode messages for a given `ProtocolId`
+    fn encoding(self) -> Encoding {
+        match self {
+            ProtocolId::ConsensusDirectSendJson | ProtocolId::ConsensusRpcJson => Encoding::Json,
+            _ => Encoding::Bcs,
+        }
     }
 
     #[cfg(test)]
@@ -88,20 +105,16 @@ impl ProtocolId {
     }
 
     pub fn to_bytes<T: Serialize>(&self, value: &T) -> anyhow::Result<Vec<u8>> {
-        match self {
-            ProtocolId::ConsensusDirectSendJson | ProtocolId::ConsensusRpcJson => {
-                serde_json::to_vec(value).map_err(|e| anyhow!("{:?}", e))
-            }
-            _ => bcs::to_bytes(value).map_err(|e| anyhow! {"{:?}", e}),
+        match self.encoding() {
+            Encoding::Json => serde_json::to_vec(value).map_err(|e| anyhow!("{:?}", e)),
+            Encoding::Bcs => bcs::to_bytes(value).map_err(|e| anyhow! {"{:?}", e}),
         }
     }
 
     pub fn from_bytes<'a, T: Deserialize<'a>>(&self, bytes: &'a [u8]) -> anyhow::Result<T> {
-        match self {
-            ProtocolId::ConsensusDirectSendJson | ProtocolId::ConsensusRpcJson => {
-                serde_json::from_slice(bytes).map_err(|e| anyhow!("{:?}", e))
-            }
-            _ => bcs::from_bytes(bytes).map_err(|e| anyhow! {"{:?}", e}),
+        match self.encoding() {
+            Encoding::Json => serde_json::from_slice(bytes).map_err(|e| anyhow!("{:?}", e)),
+            Encoding::Bcs => bcs::from_bytes(bytes).map_err(|e| anyhow! {"{:?}", e}),
         }
     }
 }
@@ -171,6 +184,11 @@ impl ProtocolIdSet {
     /// Returns if the protocol is set.
     pub fn contains(&self, protocol: ProtocolId) -> bool {
         self.0.is_set(protocol as u8)
+    }
+
+    /// Insert a new protocol into the set.
+    pub fn insert(&mut self, protocol: ProtocolId) {
+        self.0.set(protocol as u8)
     }
 }
 

@@ -73,7 +73,7 @@ pub(crate) async fn coordinator<V>(
                 handle_client_request(&mut smp, &bounded_executor, msg).await;
             },
             msg = consensus_requests.select_next_some() => {
-                tasks::process_consensus_request(&smp.mempool, msg);
+                tasks::process_consensus_request(&smp, msg);
             },
             msg = mempool_listener.select_next_some() => {
                 handle_commit_notification(&mut smp, msg, &mut mempool_listener);
@@ -82,7 +82,7 @@ pub(crate) async fn coordinator<V>(
                 handle_mempool_reconfig_event(&mut smp, &bounded_executor, reconfig_notification.on_chain_configs).await;
             },
             (peer, backoff) = scheduled_broadcasts.select_next_some() => {
-                tasks::execute_broadcast(peer, backoff, &mut smp, &mut scheduled_broadcasts, executor.clone());
+                tasks::execute_broadcast(peer, backoff, &mut smp, &mut scheduled_broadcasts, executor.clone()).await;
             },
             (network_id, event) = events.select_next_some() => {
                 handle_network_event(&executor, &bounded_executor, &mut scheduled_broadcasts, &mut smp, network_id, event).await;
@@ -170,7 +170,7 @@ fn handle_commit_notification<V>(
         msg.transactions.len(),
     );
     process_committed_transactions(
-        &smp.mempool.clone(),
+        &smp.mempool,
         msg.transactions
             .iter()
             .map(|txn| TransactionSummary {
@@ -181,6 +181,7 @@ fn handle_commit_notification<V>(
         msg.block_timestamp_usecs,
         false,
     );
+    smp.validator.write().notify_commit();
     let counter_result = if mempool_listener.ack_commit_notification(msg).is_err() {
         error!(LogSchema::event_log(
             LogEntry::StateSyncCommit,
@@ -245,7 +246,8 @@ async fn handle_network_event<V>(
                 .is_upstream_peer(is_upstream_peer));
             notify_subscribers(SharedMempoolNotification::PeerStateChange, &smp.subscribers);
             if is_new_peer && is_upstream_peer {
-                tasks::execute_broadcast(peer, false, smp, scheduled_broadcasts, executor.clone());
+                tasks::execute_broadcast(peer, false, smp, scheduled_broadcasts, executor.clone())
+                    .await;
             }
         }
         Event::LostPeer(metadata) => {

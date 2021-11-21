@@ -1,7 +1,6 @@
 // Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use compiler::Compiler;
 use diem_crypto::{ed25519::*, PrivateKey, Uniform};
 use diem_transaction_builder::stdlib::{
     encode_peer_to_peer_with_metadata_script, encode_set_validator_config_and_reconfigure_script,
@@ -21,6 +20,7 @@ use executor_test_helpers::{
     },
 };
 use executor_types::BlockExecutor;
+use move_ir_compiler::Compiler;
 use std::convert::TryFrom;
 
 #[test]
@@ -303,13 +303,11 @@ fn test_change_publishing_option_to_custom() {
         let compiler = Compiler {
             deps: diem_framework_releases::current_modules().iter().collect(),
         };
-        compiler
-            .into_script_blob("file_name", code)
-            .expect("Failed to compile")
+        compiler.into_script_blob(code).expect("Failed to compile")
     };
     let txn5 = get_test_signed_transaction(
         genesis_account,
-        /* sequence_number = */ 1,
+        /* sequence_number = */ 0,
         genesis_key.clone(),
         genesis_key.public_key(),
         Some(TransactionPayload::Script(Script::new(

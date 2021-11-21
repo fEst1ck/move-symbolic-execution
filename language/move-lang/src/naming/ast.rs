@@ -207,7 +207,7 @@ pub enum BuiltinFunction_ {
     BorrowGlobal(bool, Option<Type>),
     Exists(Option<Type>),
     Freeze(Option<Type>),
-    Assert,
+    Assert(/* is_macro */ bool),
 }
 pub type BuiltinFunction = Spanned<BuiltinFunction_>;
 
@@ -227,6 +227,7 @@ pub enum Exp_ {
         Spanned<Vec<Exp>>,
     ),
     Builtin(BuiltinFunction, Spanned<Vec<Exp>>),
+    Vector(Loc, Option<Type>, Spanned<Vec<Exp>>),
 
     IfElse(Box<Exp>, Box<Exp>, Box<Exp>),
     While(Box<Exp>, Box<Exp>),
@@ -392,7 +393,7 @@ static BUILTIN_FUNCTION_ALL_NAMES: Lazy<BTreeSet<Symbol>> = Lazy::new(|| {
         BuiltinFunction_::BORROW_GLOBAL_MUT,
         BuiltinFunction_::EXISTS,
         BuiltinFunction_::FREEZE,
-        BuiltinFunction_::ASSERT,
+        BuiltinFunction_::ASSERT_MACRO,
     ]
     .iter()
     .map(|n| Symbol::from(*n))
@@ -406,7 +407,7 @@ impl BuiltinFunction_ {
     pub const BORROW_GLOBAL_MUT: &'static str = "borrow_global_mut";
     pub const EXISTS: &'static str = "exists";
     pub const FREEZE: &'static str = "freeze";
-    pub const ASSERT: &'static str = "assert";
+    pub const ASSERT_MACRO: &'static str = "assert";
 
     pub fn all_names() -> &'static BTreeSet<Symbol> {
         &*BUILTIN_FUNCTION_ALL_NAMES
@@ -421,7 +422,6 @@ impl BuiltinFunction_ {
             BF::BORROW_GLOBAL_MUT => Some(BF::BorrowGlobal(true, arg)),
             BF::EXISTS => Some(BF::Exists(arg)),
             BF::FREEZE => Some(BF::Freeze(arg)),
-            BF::ASSERT => Some(BF::Assert),
             _ => None,
         }
     }
@@ -435,7 +435,7 @@ impl BuiltinFunction_ {
             BF::BorrowGlobal(true, _) => BF::BORROW_GLOBAL_MUT,
             BF::Exists(_) => BF::EXISTS,
             BF::Freeze(_) => BF::FREEZE,
-            BF::Assert => BF::ASSERT,
+            BF::Assert(_) => BF::ASSERT_MACRO,
         }
     }
 }
@@ -906,6 +906,17 @@ impl AstDebug for Exp_ {
                 w.comma(rhs, |w, e| e.ast_debug(w));
                 w.write(")");
             }
+            E::Vector(_loc, ty_opt, sp!(_, elems)) => {
+                w.write("vector");
+                if let Some(ty) = ty_opt {
+                    w.write("<");
+                    ty.ast_debug(w);
+                    w.write(">");
+                }
+                w.write("[");
+                w.comma(elems, |w, e| e.ast_debug(w));
+                w.write("]");
+            }
             E::Pack(m, s, tys_opt, fields) => {
                 w.write(&format!("{}::{}", m, s));
                 if let Some(ss) = tys_opt {
@@ -1037,7 +1048,7 @@ impl AstDebug for BuiltinFunction_ {
             F::BorrowGlobal(false, bt) => (F::BORROW_GLOBAL, bt),
             F::Exists(bt) => (F::EXISTS, bt),
             F::Freeze(bt) => (F::FREEZE, bt),
-            F::Assert => (F::ASSERT, &None),
+            F::Assert(_) => (F::ASSERT_MACRO, &None),
         };
         w.write(n);
         if let Some(bt) = bt {

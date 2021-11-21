@@ -476,7 +476,8 @@ impl<'env> FunctionContext<'env> {
                 }
                 return Ok(());
             }
-            Operation::TraceExp(node_id) => {
+            Operation::TraceExp(_kind, node_id) => {
+                // Perhaps do something with kind?
                 if cfg!(debug_assertions) {
                     let env = self.target.global_env();
                     let node_ty =
@@ -2173,7 +2174,7 @@ impl<'env> FunctionContext<'env> {
 
         // check and convert type arguments
         if cfg!(debug_assertions) {
-            let callee_ty_params = callee_target.get_type_parameters();
+            let callee_ty_params = callee_target.func_env.get_type_parameters();
             // TODO (mengxu) verify type constraints
             assert_eq!(callee_ty_params.len(), ty_args.len());
         }

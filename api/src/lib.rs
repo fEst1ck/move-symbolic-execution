@@ -3,12 +3,14 @@
 
 mod accounts;
 mod context;
+mod events;
 mod index;
 pub(crate) mod log;
+mod metrics;
 mod page;
 pub(crate) mod param;
 pub mod runtime;
 mod transactions;
 
 #[cfg(any(test))]
-pub(crate) mod test_utils;
+pub(crate) mod tests;

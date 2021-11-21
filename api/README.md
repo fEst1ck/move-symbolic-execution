@@ -2,7 +2,10 @@
 
 This module provides REST API for client applications to query the Diem blockchain.
 
-The [API specification](blueprint.apib) is documented in [API Blueprint](https://apiblueprint.org) format.
+* [API specification](doc/openapi.yaml)
+* [Documentation](https://diem.github.io/diem/diem_api/spec.html)
+
+> For a Diem node, you can view the documentation at `/spec.html`.
 
 ## Overview
 
@@ -71,12 +74,6 @@ An `anyhow::Error` is considered as server internal error (500) by default.
 All internal errors should be converted into `anyhow::Error` first.
 An `diem_api_types.Error` is defined for converting `anyhow::Error` to `warp.Rejection` with HTTP error code.
 
-## Logging
-
-The request log level is set to DEBUG by default.
-
-You can add `diem_api=DEBUG` into RUST_LOG environment to configure the log output.
-
 ## Testing
 
 ### Unit Test
@@ -100,18 +97,9 @@ cargo test --test "forge" "api::"
 
 ### API Specification Test
 
-* Build diem-node: `cargo build -p diem-node`
-* Install [dredd](https://dredd.org/en/latest/)
-* Run `dredd` inside the 'api' directory.
+* Run `scripts/dev_setup.sh -a` to setup tools.
+* Run `make test` inside the `api` directory.
 
+## Diem Node Operation
 
-### Render API into HTML Document
-
-
-For example, use [snowboard](https://github.com/bukalapak/snowboard)
-
-```
-npm install -g snowboard
-snowboard http blueprint.apib
-open http://localhost:8088
-```
+Please refer to [Operation](Operation.md) document for details, including configuration, logging, metrics etc.

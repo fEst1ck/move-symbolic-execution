@@ -85,6 +85,7 @@ pub struct LocalSwarmBuilder {
     template: NodeConfig,
     number_of_validators: NonZeroUsize,
     dir: Option<PathBuf>,
+    genesis_modules: Option<Vec<Vec<u8>>>,
 }
 
 impl LocalSwarmBuilder {
@@ -95,6 +96,7 @@ impl LocalSwarmBuilder {
             template: NodeConfig::default_for_validator(),
             number_of_validators: NonZeroUsize::new(1).unwrap(),
             dir: None,
+            genesis_modules: None,
         }
     }
 
@@ -118,7 +120,12 @@ impl LocalSwarmBuilder {
         self
     }
 
-    pub fn build<R>(self, rng: R) -> Result<LocalSwarm>
+    pub fn genesis_modules(mut self, genesis_modules: Vec<Vec<u8>>) -> Self {
+        self.genesis_modules = Some(genesis_modules);
+        self
+    }
+
+    pub fn build<R>(mut self, rng: R) -> Result<LocalSwarm>
     where
         R: ::rand::RngCore + ::rand::CryptoRng,
     {
@@ -132,9 +139,17 @@ impl LocalSwarmBuilder {
             SwarmDirectory::Temporary(TempDir::new()?)
         };
 
+        // Single node orders blocks too fast which would trigger backpressure and stall for 1 sec
+        // which cause flakiness in tests.
+        if self.number_of_validators.get() == 1 {
+            // this delays empty block by (30-1) * 30ms
+            self.template.consensus.mempool_poll_count = 30;
+        }
+
         let (root_keys, genesis, genesis_waypoint, validators) = ValidatorBuilder::new(
             &dir,
-            diem_framework_releases::current_module_blobs().to_vec(),
+            self.genesis_modules
+                .unwrap_or_else(|| diem_framework_releases::current_module_blobs().to_vec()),
         )
         .num_validators(self.number_of_validators)
         .template(self.template)
@@ -169,7 +184,7 @@ impl LocalSwarmBuilder {
         let root_account = LocalAccount::new(
             diem_sdk::types::account_config::diem_root_address(),
             AccountKey::from_private_key(root_keys.root_key),
-            1,
+            0,
         );
 
         // Designated dealer account is built to have the same private key as the TC account

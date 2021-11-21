@@ -1,6 +1,0 @@
-[package]
-name = "DiemExperimental"
-version = "1.5.0"
-
-[dependencies]
-DiemCoreFramework = { local = "../core" }

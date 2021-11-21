@@ -1,28 +1,32 @@
-# Experimental
+# Shuffle
+Welcome to Shuffle! Shuffle is a CLI tool for Move development on the Diem blockchain.
 
-## Step 0: Install Dependencies
+## Setup
+From diem directory:
 
-- Install Diem dependencies including Rust, Clang, etc, by running the following script in `diem` root directory:
+- Install Diem dependencies including Rust, Clang, Deno, etc, by running the following script in `diem` root directory:
 ```
 ./scripts/dev_setup.sh
 ```
+- Install shuffle binary
+```
+cargo install --path shuffle/cli
+```
+- Install deno package needed to run shuffle console
+```
+brew install deno
+```
 
-## Usage
-
-Please run `shuffle help`.
-
-## Sample Usage
-
-From the `diem/` base repo directory:
-
-1. `cargo run -p shuffle -- new /tmp/helloblockchain` creates a new shuffle project
-1. `cargo run -p shuffle -- node /tmp/helloblockchain` runs node based on project, perform in a different terminal
-1. `cargo run -p shuffle -- account /tmp/helloblockchain shuffle/cli/new_account.key` creates an account onchain
-1. `cargo run -p shuffle -- deploy /tmp/helloblockchain shuffle/cli/new_account.key` publishes a module to the created node
-1. `cargo run -p shuffle -- console /tmp/helloblockchain shuffle/cli/new_account.key` enters a typescript REPL with helpers loaded
-1. `cargo run -p shuffle -- test /tmp/helloblockchain` runs end to end tests
-
-## Development
+## Commands Overview
+1. `shuffle new`: Creates a new shuffle project for Move development
+2. `shuffle node`: Runs a local devnet
+3. `shuffle account`: Creates a private key and creates the corresponding account on-chain
+4. `shuffle build`: Compiles the Move package and generates typescript files
+5. `shuffle deploy`: Publishes all move modules inside the `/main` directory using the account as publisher
+6. `shuffle console`: Starts a REPL for onchain inspection
+7. `shuffle test`: Runs end to end .ts tests in the `/e2e` project directory
+8. `shuffe transactions`: Prints the last 10 transactions and continuously polls for new transactions from the account
+9. `shuffle help`: Prints commands overview or the help of the given subcommand
 
 Note that for local development, `shuffle` is replaced with `cargo run -p shuffle --`:
 
@@ -31,9 +35,14 @@ shuffle new /tmp/helloblockchain # is replaced by
 cargo run -p shuffle -- new /tmp/helloblockchain
 ```
 
-## Testing
+## Tutorials
+
+To start, follow the [Hello Blockchain](https://github.com/diem/diem/tree/main/shuffle/cli/tutorials/HelloBlockchain.md) tutorial.
+
+If you are a genesis move module developer, follow [Genesis Tutorial](https://github.com/diem/diem/tree/main/shuffle/cli/tutorials/Genesis.md).
+
+## Forge Testing
 
 ```
-cd shuffle/cli
-cargo test
+RUST_BACKTRACE=1 cargo xtest -p shuffle-integration-tests
 ```

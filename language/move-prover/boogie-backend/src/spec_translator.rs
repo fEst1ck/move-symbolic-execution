@@ -3,7 +3,10 @@
 
 //! This module translates specification conditions to Boogie code.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::{
+    collections::{BTreeSet, HashMap},
+    rc::Rc,
+};
 
 use itertools::Itertools;
 #[allow(unused_imports)]
@@ -47,12 +50,14 @@ pub struct SpecTranslator<'env> {
     /// Counter for creating new variables.
     fresh_var_count: RefCell<usize>,
     /// Information about lifted choice expressions. Each choice expression in the
-    /// original program is uniquely identified by the node id. This allows us to capture
-    /// duplication of expressions and map them to the same uninterpreted choice
-    /// function. If an expression is duplicated and then later specialized by a type
+    /// original program is uniquely identified by the choice expression AST (verbatim),
+    /// which includes the node id of the expression.
+    ///
+    /// This allows us to capture duplication of expressions and map them to the same uninterpreted
+    /// choice function. If an expression is duplicated and then later specialized by a type
     /// instantiation, it will have a different node id, but again the same instantiations
     /// map to the same node id, which is the desired semantics.
-    lifted_choice_infos: RefCell<BTreeMap<NodeId, LiftedChoiceInfo>>,
+    lifted_choice_infos: Rc<RefCell<HashMap<ExpData, LiftedChoiceInfo>>>,
 }
 
 /// A struct which contains information about a lifted choice expression (like `some x:int: p(x)`).
@@ -210,11 +215,11 @@ impl<'env> SpecTranslator<'env> {
                 if type_inst.is_empty() {
                     self.translate_spec_fun(module_env, *id, fun);
                 } else {
-                    SpecTranslator {
+                    let new_spec_trans = SpecTranslator {
                         type_inst,
                         ..self.clone()
-                    }
-                    .translate_spec_fun(module_env, *id, fun);
+                    };
+                    new_spec_trans.translate_spec_fun(module_env, *id, fun);
                 }
             }
         }
@@ -335,8 +340,12 @@ impl<'env> SpecTranslator<'env> {
     /// Translate lifted functions for choice expressions.
     fn translate_choice_functions(&self) {
         let env = self.env;
-        let infos = self.lifted_choice_infos.borrow();
-        for (_, info) in infos.iter() {
+        let infos_ref = self.lifted_choice_infos.borrow();
+        // need the sorting here because `lifted_choice_infos` is a hashmap while we want
+        // deterministic ordering of the output. Sorting uses the `.id` field, which represents the
+        // insertion order.
+        let infos_sorted = infos_ref.values().sorted_by(|v1, v2| v1.id.cmp(&v2.id));
+        for info in infos_sorted {
             let fun_name = boogie_choice_fun_name(info.id);
             let result_ty = &env.get_node_type(info.node_id);
             let exp_loc = env.get_node_loc(info.node_id);
@@ -349,13 +358,13 @@ impl<'env> SpecTranslator<'env> {
                 .map(|(s, ty)| {
                     (
                         s.display(env.symbol_pool()).to_string(),
-                        boogie_type(env, ty),
+                        boogie_type(env, ty.skip_reference()),
                     )
                 })
                 .chain(
                     info.used_temps
                         .iter()
-                        .map(|(t, ty)| (format!("$t{}", t), boogie_type(env, ty))),
+                        .map(|(t, ty)| (format!("$t{}", t), boogie_type(env, ty.skip_reference()))),
                 )
                 .chain(info.used_memory.iter().map(|(m, l)| {
                     let struct_env = &env.get_struct(m.to_qualified_id());
@@ -372,7 +381,7 @@ impl<'env> SpecTranslator<'env> {
             let mk_decl = |(n, t): &(String, String)| format!("{}: {}", n, t);
             let mk_arg = |(n, _): &(String, String)| n.to_owned();
             let emit_valid = |n: &str, ty: &Type| {
-                let suffix = boogie_type_suffix(env, ty);
+                let suffix = boogie_type_suffix(env, ty.skip_reference());
                 emit!(self.writer, "$IsValid'{}'({})", suffix, n);
             };
             let mk_temp = |t: TempIndex| format!("$t{}", t);
@@ -576,16 +585,19 @@ impl<'env> SpecTranslator<'env> {
             }
             ExpData::Block(node_id, vars, scope) => {
                 self.set_writer_location(*node_id);
-                self.translate_block(*node_id, vars, scope)
+                self.translate_block(vars, scope)
             }
             ExpData::IfElse(node_id, cond, on_true, on_false) => {
                 self.set_writer_location(*node_id);
-                emit!(self.writer, "if (");
-                self.translate_exp(cond);
-                emit!(self.writer, ") then ");
+                // The whole ITE is one expression so we wrap it with a parenthesis
+                emit!(self.writer, "(");
+                emit!(self.writer, "if ");
+                self.translate_exp_parenthesised(cond);
+                emit!(self.writer, " then ");
                 self.translate_exp_parenthesised(on_true);
                 emit!(self.writer, " else ");
                 self.translate_exp_parenthesised(on_false);
+                emit!(self.writer, ")");
             }
             ExpData::Invalid(_) => panic!("unexpected error expression"),
         }
@@ -622,20 +634,21 @@ impl<'env> SpecTranslator<'env> {
         }
     }
 
-    fn translate_block(&self, node_id: NodeId, vars: &[LocalVarDecl], exp: &Exp) {
+    fn translate_block(&self, vars: &[LocalVarDecl], exp: &Exp) {
         if vars.is_empty() {
             return self.translate_exp(exp);
         }
-        let loc = self.env.get_node_loc(node_id);
-        if let [var] = vars {
+        let mut bracket_num = 0;
+        for var in vars {
             let name_str = self.env.symbol_pool().string(var.name);
             emit!(self.writer, "(var {} := ", name_str);
             self.translate_exp(var.binding.as_ref().expect("binding"));
             emit!(self.writer, "; ");
-            self.translate_exp(exp);
+            bracket_num += 1;
+        }
+        self.translate_exp(exp);
+        for _n in 0..bracket_num {
             emit!(self.writer, ")");
-        } else {
-            self.error(&loc, "currently only single variable binding supported");
         }
     }
 
@@ -731,7 +744,7 @@ impl<'env> SpecTranslator<'env> {
             Operation::AbortCode => emit!(self.writer, "$abort_code"),
             Operation::AbortFlag => emit!(self.writer, "$abort_flag"),
             Operation::NoOp => { /* do nothing. */ }
-            Operation::Trace => {
+            Operation::Trace(_) => {
                 // An unreduced trace means it has been used in a spec fun or let.
                 // Create an error about this.
                 self.env.error(
@@ -1185,7 +1198,11 @@ impl<'env> SpecTranslator<'env> {
             .filter(|(s, _)| *s != some_var)
             .collect_vec();
         let used_temps = range_and_body
-            .temporaries(self.env)
+            .used_temporaries(self.env)
+            .into_iter()
+            .collect_vec();
+        let used_memory = range_and_body
+            .used_memory(self.env)
             .into_iter()
             .collect_vec();
 
@@ -1198,20 +1215,19 @@ impl<'env> SpecTranslator<'env> {
         // we can only guarantee this if we use the same uninterpreted function for each instance.
         let mut choice_infos = self.lifted_choice_infos.borrow_mut();
         let choice_count = choice_infos.len();
-        let info = choice_infos.entry(node_id).or_insert_with(|| {
-            let used_memory = body.used_memory(self.env).into_iter().collect_vec();
-            LiftedChoiceInfo {
+        let info = choice_infos
+            .entry(range_and_body)
+            .or_insert_with(|| LiftedChoiceInfo {
                 id: choice_count,
                 node_id,
                 kind,
                 free_vars: free_vars.clone(),
                 used_temps: used_temps.clone(),
-                used_memory,
+                used_memory: used_memory.clone(),
                 var: some_var,
                 range: range.1.clone(),
                 condition: body.clone(),
-            }
-        });
+            });
         let fun_name = boogie_choice_fun_name(info.id);
 
         // Construct the arguments. Notice that those might be different for each call of
@@ -1222,7 +1238,7 @@ impl<'env> SpecTranslator<'env> {
             .map(|(s, _)| s.display(self.env.symbol_pool()).to_string())
             .chain(used_temps.iter().map(|(t, _)| format!("$t{}", t)))
             .chain(
-                info.used_memory
+                used_memory
                     .iter()
                     .map(|(m, l)| boogie_resource_memory_name(self.env, m, l)),
             )
