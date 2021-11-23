@@ -85,10 +85,6 @@ type Set<T> = BTreeSet<T>;
 //   (s, EvalEffect::None)
 // }
 
-pub fn compute_block<'ctx>(codes: &[Bytecode], mut s: LocalState<'ctx>, p: &Constraint<'ctx>) -> LocalState<'ctx> {
-  todo!()
-}
-
-pub fn compute_path_constraint<'a>(codes: &[Bytecode], s: &LocalState, ctx: &'a Context) -> Option<Constraint<'a>> {
+pub fn compute_block<'ctx>(codes: &[Bytecode], s: &mut LocalState<'ctx>, p: &Constraint<'ctx>) -> Vec<Constraint<'ctx>> {
   todo!()
 }

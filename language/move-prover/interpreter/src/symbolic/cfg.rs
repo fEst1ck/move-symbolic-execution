@@ -8,7 +8,7 @@ use bytecode::{
 use crate::symbolic::{
   local_state::{LocalState},
   value::{Constraint},
-  sym_exec,
+  sym_exec::{compute_block},
 };
 use z3::{Context, ast::{Bool}};
 use petgraph::{
@@ -18,6 +18,7 @@ use petgraph::{
 use petgraph::Direction;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ops::{Index, IndexMut};
+use std::iter::Zip;
 
 type Map<K, V> = BTreeMap<K, V>;
 type Set<V> = BTreeSet<V>;
@@ -127,7 +128,7 @@ impl<'a, 'ctx> ControlFlowStateGraph<'a, 'ctx> {
     Some(Bool::or(ctx, &constraints_ref))
   }
 
-  fn compute_init_state(&self, index: NodeIndex) -> LocalState {
+  fn compute_init_state(&self, index: NodeIndex) -> LocalState<'ctx> {
     todo!()
   }
 
@@ -140,13 +141,22 @@ impl<'a, 'ctx> ControlFlowStateGraph<'a, 'ctx> {
     true
   }
 
+  // get codes for node `index`
+  fn get_codes(&self, index: NodeIndex) -> &[Bytecode] {
+    todo!()
+  }
+
   // do the compuation on `index`
   fn compute_node(&mut self, index: NodeIndex, ctx: &'ctx Context) -> bool {
     if self.check_prereq(index) {
       self.index_mut(index).constraint = self.compute_constraint(index, ctx);
       let mut state = self.compute_init_state(index);
-      
-      todo!()
+      let constraints = compute_block(self.get_codes(index), &mut state, self.index(index).constraint.as_ref().unwrap());
+      let edges: Vec<(NodeIndex, NodeIndex)> = self.graph.edges(index).map(|e| (e.source(), e.target())).collect();
+      for ((source, target), constraint) in edges.into_iter().zip(constraints.into_iter()) {
+        self.graph.update_edge(source, target, Edge{ constraint: Some(constraint) });
+      }
+      true
     } else {
       false
     }
