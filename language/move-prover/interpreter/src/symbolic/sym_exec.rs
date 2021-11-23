@@ -19,72 +19,48 @@ use crate::symbolic::value::{
 use move_model::{
   ast::{TempIndex},
 };
-use z3::{Context};
+use z3::{ast::{Bool}, Context};
 
 type Set<T> = BTreeSet<T>;
-// type ConstrainedLabel = (Label, Constraints);
 
-// enum EvalEffect {
-//   None,
-//   Goto(Label),
-//   Branch(ConstrainedLabel, ConstrainedLabel)
-// }
+fn is_jump_instruction(stmt: &Bytecode) -> bool {
+  match stmt {
+    Bytecode::Jump(_, _) => true,
+    Bytecode::Branch(_, _, _, _) => true,
+    _ => false,
+  }
+}
 
-// mod stmt {
-//   // evaluate a single bytecode
-//   pub fn eval(stmt: &Bytecode, s: &mut LocalState)
-//   -> EvalEffect {
-//     match bytecode {
-//       Bytecode::Load(_, dst, constant) => handle_load(*dst, constant, s),
-//       _ => todo!(),
-//     }
-//   }
+// evaluate a jump or branch instruction, and return the path constraints of
+// the out-edges
+fn eval_jump<'ctx>(stmt: &Bytecode, s: &LocalState<'ctx>, context: &'ctx Context) -> Vec<Constraint<'ctx>> {
+  match stmt {
+    Bytecode::Jump(_, _) => vec![Bool::from_bool(context, true)],
+    Bytecode::Branch(_, _, _, var) => {
+      let constraint = s.get_slot(*var).to_condition(context);
+      vec![constraint.clone(), constraint.not()]
+    }
+    _ => panic!(),
+  }
+}
 
-//   fn handle_load(dst: TempIndex, constant: &Constant, local_state: &mut LocalState) {
-//     let val = match constant {
-//         Constant::Bool(v) => TypedValue::mk_bool(v, local_state.context),
-//         _ => todo!(),
-//     };
-//     local_state.put_value_override(dst, val);
-//   }
-// }
+// evaluate a non-control-flow instruction
+fn eval_stmt(stmt: &Bytecode, s: &mut LocalState) {
+  match stmt {
+    Bytecode::Jump(_, _) => panic!(),
+    Bytecode::Branch(_, _, _, _) => panic!(),
+    _ => todo!(),
+  }
+}
 
-// Collect variables appearing on the LHS of the block.
-// fn used_vars(block: &[Bytecode]) -> Set<TempIndex> {
-//   fn exract_var(stmt: &Bytecode) -> Vec<TempIndex> {
-//     match stmt {
-//       Bytecode::Assign(_, dst, _, _) => vec![*dst],
-//       Bytecode::Call(_, dsts, _, _, _) => *dsts,
-//       Bytecode::Load(_, dst, _) => vec![*dst],
-//       _ => vec![],
-//     }
-//   }
-//   let res = Set::new();
-//   for stmt in block.iter() {
-//     for v in exract_var(stmt).iter() {
-//       res.insert(v);
-//     }
-//   }
-//   res
-// }
-
-// Evaluate a block of bytecodes, of which only the last can be
-// a jump or branch.
-// pub fn eval_block(codes: &[Bytecode], p: Constraints, s: mut LocalState)
-// -> (LocalState, EvalEffect) {
-//   for (i, stmt) in codes.iter().enumerate() {
-//     let res = eval_stmt(stmt, p, &mut s);
-//     match res {
-//       EvalEffect::None => (),
-//       _ => {
-//         assert_eq!(i, codes.len() - 1);
-//         return (s, res);
-//       }
-//     }
-//   }
-//   (s, EvalEffect::None)
-// }
-
-pub fn compute_block<'ctx>(codes: &[Bytecode], s: &mut LocalState<'ctx>, p: &Constraint<'ctx>) -> Vec<Constraint<'ctx>> {
-  todo!()
+/// Updates state `s` by block `codes` and returns constraints to the children
+pub fn compute_block<'ctx>(codes: &[Bytecode], s: &mut LocalState<'ctx>, context: &'ctx Context) -> Vec<Constraint<'ctx>> {
+  for stmt in codes {
+    if is_jump_instruction(stmt) {
+      return eval_jump(stmt, s, context);
+    } else {
+      eval_stmt(stmt, s);
+    }
+  }
+  Vec::new()
 }
