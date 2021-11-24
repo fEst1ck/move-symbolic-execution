@@ -52,7 +52,7 @@ fn eval_stmt(stmt: &Bytecode, s: &mut LocalState) {
   }
 }
 
-/// Updates state `s` by block `codes` and returns constraints to the children
+/// Updates state `s` by block `codes` and returns constraints to the children.
 pub fn compute_block<'ctx>(codes: &[Bytecode], s: &mut LocalState<'ctx>, context: &'ctx Context) -> Vec<Constraint<'ctx>> {
   for stmt in codes {
     if is_jump_instruction(stmt) {
