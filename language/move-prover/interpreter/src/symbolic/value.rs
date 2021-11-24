@@ -1,12 +1,7 @@
 use z3::ast as zast;
-use z3::Context;
+use z3::{Context, ast::{Bool}};
 
 pub type Constraint<'ctx> = zast::Bool<'ctx>;
-
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct Constraints<'ctx> {
-    constraint: Vec<Constraint<'ctx>>,
-}
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Value<'ctx> {
@@ -22,6 +17,13 @@ impl<'ctx> Value<'ctx> {
 
     pub fn mk_int(u: u64, ctx: &'ctx Context) -> Self {
         Self::Int(zast::Int::from_u64(ctx, u))
+    }
+
+    pub fn as_z3_bool(&self) -> &Bool<'ctx> {
+        match self {
+            Value::Bool(b) => b,
+            _ => panic!(),
+        }
     }
 }
 
@@ -87,14 +89,23 @@ impl<'ctx> TypedValue<'ctx> {
     }
 }
 
+/// A value under some path constraint.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ConstrainedValue<'ctx> {
     value: Value<'ctx>,
-    constraints: Constraints<'ctx>,
+    constraint: Constraint<'ctx>,
 }
 
 impl<'ctx> ConstrainedValue<'ctx> {
     pub fn set_val(&mut self, v: Value<'ctx>) {
         self.value = v;
+    }
+
+    pub fn condition(&self, context: &'ctx Context) -> Constraint<'ctx> {
+        Bool::and(context, vec![self.value.as_z3_bool(), &self.constraint].as_slice())
+    }
+
+    pub fn condition_neg(&self, context: &'ctx Context) -> Constraint<'ctx> {
+        Bool::and(context, vec![&self.value.as_z3_bool().not(), &self.constraint].as_slice())
     }
 }

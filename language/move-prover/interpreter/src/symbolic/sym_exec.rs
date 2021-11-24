@@ -37,8 +37,7 @@ fn eval_jump<'ctx>(stmt: &Bytecode, s: &LocalState<'ctx>, context: &'ctx Context
   match stmt {
     Bytecode::Jump(_, _) => vec![Bool::from_bool(context, true)],
     Bytecode::Branch(_, _, _, var) => {
-      let constraint = s.get_slot(*var).to_condition(context);
-      vec![constraint.clone(), constraint.not()]
+      vec![s.get_slot(*var).to_condition(context), s.get_slot(*var).to_condition_neg(context)]
     }
     _ => panic!(),
   }
