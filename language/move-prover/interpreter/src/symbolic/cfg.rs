@@ -2,6 +2,7 @@ use bytecode::{
   stackless_control_flow_graph::{
     StacklessControlFlowGraph,
     BlockId,
+    BlockContent,
   },
   stackless_bytecode::{Bytecode},
 };
@@ -18,7 +19,6 @@ use petgraph::{
 use petgraph::Direction;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ops::{Index, IndexMut};
-use std::iter::Zip;
 
 type Map<K, V> = BTreeMap<K, V>;
 type Set<V> = BTreeSet<V>;
@@ -55,6 +55,7 @@ pub struct ControlFlowStateGraph<'a, 'ctx> {
   cfg: StacklessControlFlowGraph,
   graph: Graph<Node<'ctx>, Edge<'ctx>>,
   block_id_to_node_index: Map<BlockId, NodeIndex>,
+  initial_state: LocalState<'ctx>,
 }
 
 impl<'a, 'ctx> Index<NodeIndex> for ControlFlowStateGraph<'a, 'ctx> {
@@ -71,7 +72,7 @@ impl<'a, 'ctx> IndexMut<NodeIndex> for ControlFlowStateGraph<'a, 'ctx> {
 }
 
 impl<'a, 'ctx> ControlFlowStateGraph<'a, 'ctx> {
-  pub fn new(cfg: StacklessControlFlowGraph, codes: &'a [Bytecode]) -> Self {
+  pub fn new(cfg: StacklessControlFlowGraph, codes: &'a [Bytecode], initial_state: LocalState<'ctx>) -> Self {
     let mut graph: Graph<Node, Edge> = Graph::new();
     let mut block_id_to_node_index: Map<BlockId, NodeIndex> = Map::new();
     // add all blocks into `res`
@@ -95,11 +96,12 @@ impl<'a, 'ctx> ControlFlowStateGraph<'a, 'ctx> {
         }
       }
     }
-    Self { codes, cfg , graph, block_id_to_node_index }
+    Self { codes, cfg , graph, block_id_to_node_index, initial_state }
   }
 
-  // (u; q) ~p~> v
-  // returns q and p
+  // Computes the accumulated constraints along en edge.
+  // If `edge` is from node `u`, then
+  // produces `u.constraint && p.constraint`.
   fn compute_path_constraint(&self, edge: EdgeReference<Edge<'ctx>>, ctx: &'ctx Context) -> Option<Constraint<'ctx>> {
     let parent = self.index(edge.source());
     if !edge.weight().done() || !parent.done() {
@@ -111,6 +113,19 @@ impl<'a, 'ctx> ControlFlowStateGraph<'a, 'ctx> {
     }
   }
 
+  // Produces the state after the jump.
+  // Panics if the computation on parent isn't done.
+  fn compute_path_state(&self, edge: EdgeReference<Edge<'ctx>>, ctx: &'ctx Context) -> LocalState<'ctx> {
+    let parent = self.index(edge.source());
+    let mut init_state: LocalState<'ctx> = parent.state.clone().unwrap();
+    init_state.add_constraint(edge.weight().constraint.as_ref().unwrap(), ctx);
+    init_state
+  }
+
+  /// Produces the accumulated constraint of node `index`.
+  /// 
+  /// If node `index` has parents and constraints to it (s, p) ..., then
+  /// the accumulated constraint of `index` is (or (and s p) ...).
   fn compute_constraint(&self, index: NodeIndex, ctx: &'ctx Context) -> Option<Constraint<'ctx>> {
     let mut constraints: Vec<Bool<'ctx>> = Vec::new();
     for in_edge in self.graph.edges_directed(index, Direction::Incoming) {
@@ -123,16 +138,25 @@ impl<'a, 'ctx> ControlFlowStateGraph<'a, 'ctx> {
     }
     let mut constraints_ref: Vec<&Bool<'ctx>> = Vec::with_capacity(constraints.len());
     for c in &constraints {
-      constraints_ref.push(c)
+      constraints_ref.push(c);
     }
     Some(Bool::or(ctx, &constraints_ref))
   }
 
-  fn compute_init_state(&self, index: NodeIndex) -> LocalState<'ctx> {
-    todo!()
+  /// Produces the initial state of node `index`.
+  fn compute_init_state(&self, index: NodeIndex, ctx: &'ctx Context) -> LocalState<'ctx> {
+    let states: Vec<LocalState> = self.graph.edges_directed(index, Direction::Incoming)
+                                            .map(|x| self.compute_path_state(x, ctx)).collect();
+    if states.len() == 0 {
+      self.initial_state.clone()
+    } else if states.len() == 1 {
+      states[0].clone()
+    } else {
+      LocalState::merge(states[0].clone(), states[1].clone())
+    }
   }
 
-  // check if the computations before `index` are done
+  /// Checks if the computations before `index` are done.
   fn check_prereq(&self, index: NodeIndex) -> bool {
     for in_edge in self.graph.edges_directed(index, Direction::Incoming) {
       if !self.graph[in_edge.source()].done() { return false }
@@ -141,17 +165,24 @@ impl<'a, 'ctx> ControlFlowStateGraph<'a, 'ctx> {
     true
   }
 
-  // get codes for node `index`
-  fn get_codes(&self, index: NodeIndex) -> &[Bytecode] {
-    todo!()
+  /// Gets the code block of node `index`.
+  pub fn get_codes(&self, index: NodeIndex) -> &[Bytecode] {
+    let block_id =  self.index(index).block;
+    match self.cfg.content(block_id) {
+      BlockContent::Dummy => &[],
+      BlockContent::Basic{ lower, upper } => &self.codes[*lower as usize..*upper as usize],
+    }
   }
 
-  // do the compuation on `index`
+  /// Does the compuation on `index`.
+  /// 
+  /// This will set the node weight to the final state of the block
+  /// and the weights of the outgoing edges to their corresponding constraints.
   fn compute_node(&mut self, index: NodeIndex, ctx: &'ctx Context) -> bool {
     if self.check_prereq(index) {
       self.index_mut(index).constraint = self.compute_constraint(index, ctx);
-      let mut state = self.compute_init_state(index);
-      let constraints = compute_block(self.get_codes(index), &mut state, self.index(index).constraint.as_ref().unwrap());
+      let mut state = self.compute_init_state(index, ctx);
+      let constraints = compute_block(self.get_codes(index), &mut state, ctx);
       let edges: Vec<(NodeIndex, NodeIndex)> = self.graph.edges(index).map(|e| (e.source(), e.target())).collect();
       for ((source, target), constraint) in edges.into_iter().zip(constraints.into_iter()) {
         self.graph.update_edge(source, target, Edge{ constraint: Some(constraint) });

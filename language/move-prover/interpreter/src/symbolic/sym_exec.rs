@@ -1,5 +1,4 @@
 use bytecode::{
-  function_target::FunctionTarget,
   stackless_bytecode::{
     Bytecode, Label, Constant,
   },
@@ -8,7 +7,7 @@ use bytecode::{
     BlockContent,
   },
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeSet};
 use crate::symbolic::local_state::{
   LocalState,
 };
@@ -20,8 +19,6 @@ use move_model::{
   ast::{TempIndex},
 };
 use z3::{ast::{Bool}, Context};
-
-type Set<T> = BTreeSet<T>;
 
 fn is_jump_instruction(stmt: &Bytecode) -> bool {
   match stmt {
