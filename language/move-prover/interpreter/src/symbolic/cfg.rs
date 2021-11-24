@@ -14,7 +14,8 @@ use crate::symbolic::{
 use z3::{Context, ast::{Bool}};
 use petgraph::{
   graph::{Graph, NodeIndex, EdgeReference},
-  visit::EdgeRef,
+  visit::{EdgeRef, IntoNeighborsDirected, IntoNodeIdentifiers},
+  algo::{toposort},
 };
 use petgraph::Direction;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -183,13 +184,33 @@ impl<'a, 'ctx> ControlFlowStateGraph<'a, 'ctx> {
       self.index_mut(index).constraint = self.compute_constraint(index, ctx);
       let mut state = self.compute_init_state(index, ctx);
       let constraints = compute_block(self.get_codes(index), &mut state, ctx);
-      let edges: Vec<(NodeIndex, NodeIndex)> = self.graph.edges(index).map(|e| (e.source(), e.target())).collect();
-      for ((source, target), constraint) in edges.into_iter().zip(constraints.into_iter()) {
+      // set out edges
+      let out_edges: Vec<(NodeIndex, NodeIndex)> = self.graph.edges(index).map(|e| (e.source(), e.target())).collect();
+      // treats the special case when block is dummy
+      if !out_edges.is_empty() && constraints.is_empty() {
+        assert_eq!(out_edges.len(), 1);
+        let (s, t) = &out_edges[0];
+        self.graph.update_edge(*s, *t, Edge{ constraint: Some(Bool::from_bool(ctx, true)) });
+        return true;
+      }
+      assert_eq!(constraints.len(), out_edges.len());
+      for ((source, target), constraint) in out_edges.into_iter().zip(constraints.into_iter()) {
         self.graph.update_edge(source, target, Edge{ constraint: Some(constraint) });
       }
       true
     } else {
       false
+    }
+  }
+
+  pub fn main(&mut self, ctx: &'ctx Context) {
+    match toposort(&self.graph, None) {
+      Ok(nodes) => {
+        for node in nodes {
+          assert!(self.compute_node(node, ctx), "Wrong order of computation!");
+        }
+      }
+      Err(_) => todo!(),
     }
   }
 }
