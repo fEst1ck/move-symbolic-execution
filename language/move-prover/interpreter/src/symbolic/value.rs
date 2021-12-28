@@ -1,5 +1,5 @@
 use z3::ast as zast;
-use z3::{Context, ast::{Bool}};
+use z3::{Context, ast::{Bool, Int}};
 
 pub type Constraint<'ctx> = zast::Bool<'ctx>;
 
@@ -23,6 +23,13 @@ impl<'ctx> Value<'ctx> {
         match self {
             Value::Bool(b) => b,
             _ => panic!(),
+        }
+    }
+
+    pub fn add(&self, other: &Value<'ctx>) -> Self {
+        match (self, other) {
+            (Value::Int(x), Value::Int(y)) => Value::Int(x + y),
+            _ => panic!("Wrong type for addition!"),
         }
     }
 }
@@ -97,8 +104,21 @@ pub struct ConstrainedValue<'ctx> {
 }
 
 impl<'ctx> ConstrainedValue<'ctx> {
+    pub fn new(value: Value<'ctx>, constraint: Constraint<'ctx>) -> Self {
+        Self { value, constraint }
+    }
+    
+    pub fn decompose(self) -> (Value<'ctx>, Constraint<'ctx>) {
+        (self.value, self.constraint)
+    }
+
     pub fn set_val(&mut self, v: Value<'ctx>) {
         self.value = v;
+    }
+
+    pub fn add_constraint(&mut self, p: &Constraint<'ctx>, ctx: &'ctx Context) {
+        let constraints = vec![&self.constraint, p];
+        self.constraint = Bool::and(ctx, constraints.as_slice());
     }
 
     pub fn condition(&self, context: &'ctx Context) -> Constraint<'ctx> {

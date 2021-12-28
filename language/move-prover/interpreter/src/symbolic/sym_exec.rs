@@ -1,6 +1,7 @@
 use bytecode::{
   stackless_bytecode::{
-    Bytecode, Label, Constant,
+    Bytecode, Label, Constant, AssignKind, Operation,
+    AbortAction,
   },
   stackless_control_flow_graph::{
     StacklessControlFlowGraph,
@@ -14,6 +15,7 @@ use crate::symbolic::local_state::{
 use crate::symbolic::value::{
   TypedValue,
   Constraint,
+  ConstrainedValue,
 };
 use move_model::{
   ast::{TempIndex},
@@ -28,24 +30,64 @@ fn is_jump_instruction(stmt: &Bytecode) -> bool {
   }
 }
 
-// evaluate a jump or branch instruction, and return the path constraints of
-// the out-edges
+// Evaluates a jump or branch instruction, and return the path constraints of
+// the out-edges. Panics if given non-branch instruction.
 fn eval_jump<'ctx>(stmt: &Bytecode, s: &LocalState<'ctx>, context: &'ctx Context) -> Vec<Constraint<'ctx>> {
   match stmt {
     Bytecode::Jump(_, _) => vec![Bool::from_bool(context, true)],
     Bytecode::Branch(_, _, _, var) => {
       vec![s.get_slot(*var).to_condition(context), s.get_slot(*var).to_condition_neg(context)]
     }
-    _ => panic!(),
+    _ => panic!("Given non-branch instruction."),
   }
 }
 
-// evaluate a non-control-flow instruction
+// Helper functions for cases of `eval_stmt`.
+mod eval {
+  use super::*;
+  /// Used to evaluate an `Assign`.
+  pub fn assign(dst: TempIndex, src: TempIndex, kind: AssignKind, s: &mut LocalState) {
+    let src_val = match kind {
+      AssignKind::Move => s.del_val(src),
+      AssignKind::Copy | AssignKind::Store => s.get_val(src),
+    };
+    s.set(dst, src_val);
+  }
+
+  /// Used to evaluate a `Call`.
+  // todo: handle `on_abort`
+  pub fn operation<'ctx>(dsts: &[TempIndex], op: Operation, srcs: &[TempIndex], _on_abort: Option<&AbortAction>, s: &mut LocalState<'ctx>) {
+    let res: Vec<Vec<ConstrainedValue<'ctx>>> = match op {
+      Operation::Add => {
+        let operands = s.get_constrained_operands(srcs);
+        let res = {
+          operands.into_iter().map(|x| {
+            let (ops, constraint) = x;
+            assert_eq!(ops.len(), 2, "Addition has two operands.");
+            let res_val = ops[0].add(&ops[1]);
+            ConstrainedValue::new(res_val, constraint)
+          }).collect::<Vec<ConstrainedValue<'ctx>>>()
+        };
+        vec![res]
+      }
+      _ => todo!(),
+    };
+    s.set_vars(dsts, res);
+  }
+}
+
+// Evaluates a non-branch instruction. Panics if given a branch instruction.
 fn eval_stmt(stmt: &Bytecode, s: &mut LocalState) {
   match stmt {
     Bytecode::Jump(_, _) => panic!(),
     Bytecode::Branch(_, _, _, _) => panic!(),
-    _ => todo!(),
+    Bytecode::Assign(_, dst, src, kind) => {
+      eval::assign(*dst, *src, *kind, s)
+    }
+    Bytecode::Call(_, dsts, op, srcs, abort_action) => {
+      eval::operation(dsts.as_slice(), op.clone(), srcs.as_slice(), abort_action.as_ref(), s)
+    }
+    _ => (),
   }
 }
 

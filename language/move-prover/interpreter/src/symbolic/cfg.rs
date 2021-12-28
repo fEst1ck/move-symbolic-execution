@@ -214,3 +214,19 @@ impl<'a, 'ctx> ControlFlowStateGraph<'a, 'ctx> {
     }
   }
 }
+
+#[cfg(test)]
+mod test {
+  use super::*;
+  use Bytecode::*;
+  use bytecode::stackless_bytecode::{AssignKind, AttrId};
+
+  #[test]
+  fn foo() {
+    let dummy = AttrId::new(0);
+    let codes = vec![
+    Assign(dummy, 2, 0, AssignKind::Copy),
+    
+    ];
+  }
+}
