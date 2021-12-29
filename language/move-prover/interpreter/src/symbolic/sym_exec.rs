@@ -70,6 +70,16 @@ mod eval {
         };
         vec![res]
       }
+      Operation::Lt => {
+        let operands = s.get_constrained_operands(srcs);
+        let res = operands.into_iter().map(|x| {
+          let (ops, constraint) = x;
+          assert_eq!(ops.len(), 2, "Lt has two operands.");
+          let res_val = ops[0].lt(&ops[1]);
+          ConstrainedValue::new(res_val, constraint)
+        }).collect();
+        vec![res]
+      }
       _ => todo!(),
     };
     s.set_vars(dsts, res);

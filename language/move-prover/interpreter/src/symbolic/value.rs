@@ -26,10 +26,19 @@ impl<'ctx> Value<'ctx> {
         }
     }
 
+    /// Produces `self + other`. Panics if `self` or `other` are not nubmers.
     pub fn add(&self, other: &Value<'ctx>) -> Self {
         match (self, other) {
             (Value::Int(x), Value::Int(y)) => Value::Int(x + y),
             _ => panic!("Wrong type for addition!"),
+        }
+    }
+    
+    // Produces `self < other`. Panics if types mismatch.
+    pub fn lt(&self, other: &Value<'ctx>) -> Self {
+        match (self, other) {
+            (Value::Int(x), Value::Int(y)) => Value::Bool(x.lt(y)),
+            _ => panic!("Wrong type for comparison!"),
         }
     }
 }
