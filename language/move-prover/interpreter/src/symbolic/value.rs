@@ -1,5 +1,8 @@
 use z3::ast as zast;
-use z3::{Context, ast::{Bool, Int}};
+use z3::{Context, ast::{Bool, Int, Ast}};
+use bytecode::{
+    stackless_bytecode::{Constant},
+};
 
 pub type Constraint<'ctx> = zast::Bool<'ctx>;
 
@@ -11,6 +14,17 @@ pub enum Value<'ctx> {
 }
 
 impl<'ctx> Value<'ctx> {
+    /// Produces the value corresponding to constant `c`.
+    pub fn from_constant(c: &Constant, context: &'ctx Context) -> Self {
+        match c {
+            Constant::Bool(b) => Value::Bool(Bool::from_bool(context, b.clone())),
+            Constant::U8(x) => Value::Int(Int::from_u64(context, *x as u64)),
+            Constant::U64(x) => Value::Int(Int::from_u64(context, *x as u64)),
+            Constant::U128(x) => Value::Int(Int::from_u64(context, *x as u64)),
+            _ => todo!(),
+        }
+    }
+
     pub fn mk_bool(b: bool, ctx: &'ctx Context) -> Self {
         Self::Bool(zast::Bool::from_bool(ctx, b))
     }
@@ -23,6 +37,14 @@ impl<'ctx> Value<'ctx> {
         match self {
             Value::Bool(b) => b,
             _ => panic!(),
+        }
+    }
+
+    pub fn get_context(&self) -> &'ctx Context {
+        match self {
+            Self::Bool(x) => x.get_ctx(),
+            Self::Int(x) => x.get_ctx(),
+            _ => todo!(),
         }
     }
 
@@ -72,6 +94,10 @@ impl Type {
     pub fn mk_bool() -> Self {
         Type::Base(BaseType::Primitive(PrimitiveType::Bool))
     }
+
+    pub fn mk_num() -> Self {
+        Type::Base(BaseType::Primitive(PrimitiveType::Int(IntType::Num)))
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -115,6 +141,10 @@ pub struct ConstrainedValue<'ctx> {
 impl<'ctx> ConstrainedValue<'ctx> {
     pub fn new(value: Value<'ctx>, constraint: Constraint<'ctx>) -> Self {
         Self { value, constraint }
+    }
+
+    pub fn from_value(value: Value<'ctx>, context: &'ctx Context) -> Self {
+        Self { value, constraint: Bool::from_bool(context, true) }
     }
     
     pub fn decompose(self) -> (Value<'ctx>, Constraint<'ctx>) {

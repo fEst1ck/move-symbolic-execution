@@ -4,7 +4,7 @@ use bytecode::{
     BlockId,
     BlockContent,
   },
-  stackless_bytecode::{Bytecode},
+  stackless_bytecode::{Bytecode, Operation, Constant},
 };
 use crate::symbolic::{
   local_state::{LocalState},
@@ -98,6 +98,10 @@ impl<'a, 'ctx> ControlFlowStateGraph<'a, 'ctx> {
       }
     }
     Self { codes, cfg , graph, block_id_to_node_index, initial_state }
+  }
+
+  pub fn get_graph(&self) -> &Graph<Node<'ctx>, Edge<'ctx>> {
+    &self.graph
   }
 
   // Computes the accumulated constraints along en edge.
@@ -219,14 +223,52 @@ impl<'a, 'ctx> ControlFlowStateGraph<'a, 'ctx> {
 mod test {
   use super::*;
   use Bytecode::*;
-  use bytecode::stackless_bytecode::{AssignKind, AttrId};
+  use bytecode::stackless_bytecode::{AssignKind, AttrId, Label};
+  use crate::symbolic::{
+    value::{Type, ConstrainedValue, Value},
+  };
+  use z3::{Config, Context};
+  use z3::{Context, ast::{Bool, Int}};
+
+  use petgraph::Graph;
+  use petgraph::dot::{Dot, Config};
 
   #[test]
-  fn foo() {
+  fn cfg_simple() {
     let dummy = AttrId::new(0);
     let codes = vec![
-    Assign(dummy, 2, 0, AssignKind::Copy),
-    
+      Load(dummy, 2, Constant::U64(0)),
+      Assign(dummy, 3, 0, AssignKind::Copy),
+      Call(dummy, vec![4], Operation::Lt, vec![2, 3], None),
+      Branch(dummy, Label::new(6), Label::new(4), 4),
+      Label(dummy, Label::new(4)),
+      Jump(dummy, Label::new(10)),
+      Assign(dummy, 5, 0, AssignKind::Copy),
+      Assign(dummy, 1, 5, AssignKind::Store),
+      Jump(dummy, Label::new(14)),
+      Label(dummy, Label::new(10)),
+      Load(dummy, 6, Constant::U64(0)),
+      Assign(dummy, 1, 6, AssignKind::Copy),
+      Jump(dummy, Label::new(14)),
+      Assign(dummy, 7, 1, AssignKind::Move),
     ];
+    let cfg = StacklessControlFlowGraph::new_forward(codes.as_slice());
+    let types = vec![
+      Type::mk_num(),
+      Type::mk_num(),
+      Type::mk_num(),
+      Type::mk_num(),
+      Type::mk_bool(),
+      Type::mk_num(),
+      Type::mk_num(),
+      Type::mk_num(),
+      ];
+    let config = Config::new();
+    let ctx = Context::new(&config);
+    let mut mem = LocalState::from_types(types.as_slice(), &ctx);
+    mem.get_mut_slot(0).set(vec![ConstrainedValue::from_value(Value::Int(Int::fresh_const(&ctx, "$t0")), &ctx)]);
+    let mut cfsg = ControlFlowStateGraph::new(cfg, codes.as_slice(), mem);
+    cfsg.main(&ctx);
+    println!("{:?}", Dot::new(cfsg.get_graph()));
   }
 }

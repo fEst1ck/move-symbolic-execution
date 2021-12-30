@@ -84,6 +84,10 @@ mod eval {
     };
     s.set_vars(dsts, res);
   }
+
+  pub fn load(x: TempIndex, c: &Constant, s: &mut LocalState) {
+    s.get_mut_slot(x).load_constant(c);
+  }
 }
 
 // Evaluates a non-branch instruction. Panics if given a branch instruction.
@@ -97,6 +101,7 @@ fn eval_stmt(stmt: &Bytecode, s: &mut LocalState) {
     Bytecode::Call(_, dsts, op, srcs, abort_action) => {
       eval::operation(dsts.as_slice(), op.clone(), srcs.as_slice(), abort_action.as_ref(), s)
     }
+    Bytecode::Load(_, x, c) => eval::load(*x, c, s),
     _ => (),
   }
 }

@@ -6,15 +6,28 @@ use z3::{Context, ast::{Bool, Ast}, Solver, SatResult};
 use move_model::{
     ast::{TempIndex},
 };
+use bytecode::{
+    stackless_bytecode::{Constant},
+};
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct LocalSlot<'ctx> {
     name: String,
     ty: Type,
     content: Vec<ConstrainedValue<'ctx>>,
+    context: &'ctx Context,
 }
 
 impl<'ctx> LocalSlot<'ctx> {
+    pub fn from_type(t: Type, ctx: &'ctx Context) -> Self {
+        Self {
+            name: String::new(),
+            ty: t,
+            content: Vec::new(),
+            context: ctx,
+        }
+    }
+
     // set the value to v under all path constraints
     fn set_val(&mut self, v: Value<'ctx>) {
         for cv in &mut self.content {
@@ -29,6 +42,16 @@ impl<'ctx> LocalSlot<'ctx> {
             assert_eq!(self.ty, t);
         }
         self.set_val(v);
+    }
+
+    /// Loads constant `c` in current slot. Panics if type mismatches.
+    // todo: check for type mismatches.
+    pub fn load_constant(&mut self, c: &Constant) {
+        let val = Value::from_constant(c, self.context);
+        // todo
+        for cv in &mut self.content {
+            cv.set_val(val.clone());
+        }
     }
 
     // self = (v_i, c_i) ...
@@ -84,6 +107,14 @@ pub struct LocalState<'ctx> {
 }
 
 impl<'ctx> LocalState<'ctx> {
+    pub fn from_types(types: &[Type], context: &'ctx Context) -> Self {
+        Self {
+            slots: types.iter().map(|x| {
+                LocalSlot::from_type(x.clone(), context)
+            }).collect()
+        }
+    }
+
     // set variable x to value v
     pub fn set_var(&mut self, x: TempIndex, v: TypedValue<'ctx>) {
         self.slots[x].load(v)
@@ -114,6 +145,10 @@ impl<'ctx> LocalState<'ctx> {
 
     pub fn get_slot(&self, index: TempIndex) -> &LocalSlot<'ctx> {
         &self.slots[index]
+    }
+
+    pub fn get_mut_slot(&mut self, index: TempIndex) -> &mut LocalSlot<'ctx> {
+        &mut self.slots[index]
     }
 
     pub fn merge(s1: LocalState<'ctx>, s2: LocalState<'ctx>) -> LocalState<'ctx> {
