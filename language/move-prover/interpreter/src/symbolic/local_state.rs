@@ -9,8 +9,9 @@ use move_model::{
 use bytecode::{
     stackless_bytecode::{Constant},
 };
+use std::fmt;
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct LocalSlot<'ctx> {
     name: String,
     ty: Type,
@@ -18,12 +19,19 @@ pub struct LocalSlot<'ctx> {
     context: &'ctx Context,
 }
 
+impl<'ctx> fmt::Debug for LocalSlot<'ctx> {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        fmt.write_fmt(format_args!("{} = {:?}", self.name, self.content))
+    }
+}
+
 impl<'ctx> LocalSlot<'ctx> {
+    /// Produces a slot with an undefined value of type `t`.
     pub fn from_type(t: Type, ctx: &'ctx Context) -> Self {
         Self {
             name: String::new(),
             ty: t,
-            content: Vec::new(),
+            content: vec![ConstrainedValue::new(Value::Undefined, Bool::from_bool(ctx, true))],
             context: ctx,
         }
     }
@@ -99,18 +107,32 @@ impl<'ctx> LocalSlot<'ctx> {
     pub fn set(&mut self, vals: Vec<ConstrainedValue<'ctx>>) {
         self.content = vals;
     }
+
+    pub fn set_name(&mut self, s: String) {
+        self.name = s;
+    }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct LocalState<'ctx> {
     slots: Vec<LocalSlot<'ctx>>,
 }
 
+impl<'ctx> fmt::Debug for LocalState<'ctx> {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        fmt.write_fmt(format_args!("{:?}", self.slots))
+    }
+}
+
 impl<'ctx> LocalState<'ctx> {
     pub fn from_types(types: &[Type], context: &'ctx Context) -> Self {
+        let mut counter = 0;
         Self {
             slots: types.iter().map(|x| {
-                LocalSlot::from_type(x.clone(), context)
+                let mut res = LocalSlot::from_type(x.clone(), context);
+                res.set_name(format!("$t{}", counter));
+                counter = counter + 1;
+                res
             }).collect()
         }
     }
@@ -131,10 +153,6 @@ impl<'ctx> LocalState<'ctx> {
     // Sets the values of variable `x` to `vals`.
     pub fn set(&mut self, x: TempIndex, vals: Vec<ConstrainedValue<'ctx>>) {
         self.slots.get_mut(x).unwrap().set(vals)
-    }
-
-    pub fn or(states: Vec<&LocalState<'ctx>>) -> Self {
-        todo!()
     }
 
     pub fn add_constraint(&mut self, p: &Constraint<'ctx>, ctx: &'ctx Context) {
@@ -200,9 +218,9 @@ impl<'ctx> LocalState<'ctx> {
         if vars.is_empty() {
             Vec::new()
         } else {
-            let (head, tail) = vars.split_last().unwrap();
-            let almost = self.get_constrained_operands(tail);
-            self.get_val(*head).into_iter().map(|x| add_operand(x, almost.clone())).flatten().collect()
+            let (last, firsts) = vars.split_last().unwrap();
+            let almost = self.get_constrained_operands(firsts);
+            self.get_val(*last).into_iter().map(|x| add_operand(x, almost.clone())).flatten().collect()
         }
     }
 }

@@ -74,7 +74,7 @@ mod eval {
         let operands = s.get_constrained_operands(srcs);
         let res = operands.into_iter().map(|x| {
           let (ops, constraint) = x;
-          assert_eq!(ops.len(), 2, "Lt has two operands.");
+          assert_eq!(ops.len(), 2, "Arity mismatch. Lt has two operands, but given {}.", ops.len());
           let res_val = ops[0].lt(&ops[1]);
           ConstrainedValue::new(res_val, constraint)
         }).collect();

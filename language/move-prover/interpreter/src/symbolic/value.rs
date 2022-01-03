@@ -3,6 +3,7 @@ use z3::{Context, ast::{Bool, Int, Ast}};
 use bytecode::{
     stackless_bytecode::{Constant},
 };
+use std::fmt;
 
 pub type Constraint<'ctx> = zast::Bool<'ctx>;
 
@@ -10,6 +11,7 @@ pub type Constraint<'ctx> = zast::Bool<'ctx>;
 pub enum Value<'ctx> {
     Bool(zast::Bool<'ctx>),
     Int(zast::Int<'ctx>),
+    Undefined,
     // ...
 }
 
@@ -132,10 +134,16 @@ impl<'ctx> TypedValue<'ctx> {
 }
 
 /// A value under some path constraint.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct ConstrainedValue<'ctx> {
     value: Value<'ctx>,
     constraint: Constraint<'ctx>,
+}
+
+impl<'ctx> fmt::Debug for ConstrainedValue<'ctx> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&format!("{:?} if {:?}", &self.value, &self.constraint))
+    }
 }
 
 impl<'ctx> ConstrainedValue<'ctx> {

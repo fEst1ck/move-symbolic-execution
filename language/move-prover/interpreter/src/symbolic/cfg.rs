@@ -18,17 +18,31 @@ use petgraph::{
   algo::{toposort},
 };
 use petgraph::Direction;
+use petgraph::dot::{Dot};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ops::{Index, IndexMut};
+use std::fmt;
 
 type Map<K, V> = BTreeMap<K, V>;
 type Set<V> = BTreeSet<V>;
 
 // `constraint` is the path constraint under which the node is reachable
+#[derive(Clone, Eq, PartialEq)]
 pub struct Node<'ctx> {
   block: BlockId,
   state: Option<LocalState<'ctx>>,
+  /// Accumulated path constraint.
   constraint: Option<Constraint<'ctx>>
+}
+
+impl<'ctx> fmt::Debug for Node<'ctx> {
+  fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+      fmt.write_fmt(format_args!(
+        "Block {}
+        Accumulated path constraint: {:?}
+        ----------
+        {:?}", self.block, self.constraint, self.state))
+  }
 }
 
 impl<'a> Node<'a> {
@@ -38,6 +52,7 @@ impl<'a> Node<'a> {
 }
 
 // `constraint` is the condition of the jump
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Edge<'ctx>{
   constraint: Option<Constraint<'ctx>>,
 }
@@ -86,17 +101,31 @@ impl<'a, 'ctx> ControlFlowStateGraph<'a, 'ctx> {
     let mut frontier: VecDeque<BlockId> = VecDeque::new();
     frontier.push_back(cfg.entry_block());
     while !frontier.is_empty() {
-      let now_explore: BlockId = frontier.pop_front().unwrap();
+      let mut now_explore: BlockId = frontier.pop_front().unwrap();
+      // handle the dummy exit
+      if !block_id_to_node_index.contains_key(&now_explore) {
+        now_explore = 1;
+      }
+      if visited.contains(&now_explore) {
+        continue;
+      }
+
       visited.insert(now_explore);
-      for to_explore in cfg.successors(now_explore) {
-        if !visited.contains(&now_explore) {
+      for mut to_explore in cfg.successors(now_explore) {
+        // handle the dummy exit
+        if !block_id_to_node_index.contains_key(&to_explore) {
+          to_explore = &1;
+        }
+        if !visited.contains(&to_explore) {
           frontier.push_back(*to_explore);
+          println!("adding edge {:?} {:?}", now_explore, to_explore);
           graph.add_edge(*block_id_to_node_index.get(&now_explore).unwrap(),
                        *block_id_to_node_index.get(&to_explore).unwrap(),
                        Edge { constraint: None });
         }
       }
     }
+
     Self { codes, cfg , graph, block_id_to_node_index, initial_state }
   }
 
@@ -175,7 +204,7 @@ impl<'a, 'ctx> ControlFlowStateGraph<'a, 'ctx> {
     let block_id =  self.index(index).block;
     match self.cfg.content(block_id) {
       BlockContent::Dummy => &[],
-      BlockContent::Basic{ lower, upper } => &self.codes[*lower as usize..*upper as usize],
+      BlockContent::Basic{ lower, upper } => &self.codes[*lower as usize..(*upper + 1) as usize],
     }
   }
 
@@ -188,6 +217,7 @@ impl<'a, 'ctx> ControlFlowStateGraph<'a, 'ctx> {
       self.index_mut(index).constraint = self.compute_constraint(index, ctx);
       let mut state = self.compute_init_state(index, ctx);
       let constraints = compute_block(self.get_codes(index), &mut state, ctx);
+      self.index_mut(index).state = Some(state);
       // set out edges
       let out_edges: Vec<(NodeIndex, NodeIndex)> = self.graph.edges(index).map(|e| (e.source(), e.target())).collect();
       // treats the special case when block is dummy
@@ -228,31 +258,34 @@ mod test {
     value::{Type, ConstrainedValue, Value},
   };
   use z3::{Config, Context};
-  use z3::{Context, ast::{Bool, Int}};
+  use z3::{ast::{Bool, Int}};
 
   use petgraph::Graph;
-  use petgraph::dot::{Dot, Config};
+  use petgraph::dot::{Dot};
 
   #[test]
-  fn cfg_simple() {
+  fn relu() {
     let dummy = AttrId::new(0);
     let codes = vec![
       Load(dummy, 2, Constant::U64(0)),
       Assign(dummy, 3, 0, AssignKind::Copy),
       Call(dummy, vec![4], Operation::Lt, vec![2, 3], None),
-      Branch(dummy, Label::new(6), Label::new(4), 4),
-      Label(dummy, Label::new(4)),
-      Jump(dummy, Label::new(10)),
+      Branch(dummy, Label::new(0), Label::new(1), 4),
+      Label(dummy, Label::new(1)),
+      Jump(dummy, Label::new(2)),
+      Label(dummy, Label::new(0)),
       Assign(dummy, 5, 0, AssignKind::Copy),
       Assign(dummy, 1, 5, AssignKind::Store),
-      Jump(dummy, Label::new(14)),
-      Label(dummy, Label::new(10)),
+      Jump(dummy, Label::new(3)),
+      Label(dummy, Label::new(2)),
       Load(dummy, 6, Constant::U64(0)),
       Assign(dummy, 1, 6, AssignKind::Copy),
-      Jump(dummy, Label::new(14)),
+      Jump(dummy, Label::new(3)),
+      Label(dummy, Label::new(3)),
       Assign(dummy, 7, 1, AssignKind::Move),
     ];
     let cfg = StacklessControlFlowGraph::new_forward(codes.as_slice());
+    cfg.display();
     let types = vec![
       Type::mk_num(),
       Type::mk_num(),
@@ -266,7 +299,7 @@ mod test {
     let config = Config::new();
     let ctx = Context::new(&config);
     let mut mem = LocalState::from_types(types.as_slice(), &ctx);
-    mem.get_mut_slot(0).set(vec![ConstrainedValue::from_value(Value::Int(Int::fresh_const(&ctx, "$t0")), &ctx)]);
+    mem.get_mut_slot(0).set(vec![ConstrainedValue::from_value(Value::Int(Int::fresh_const(&ctx, "x")), &ctx)]);
     let mut cfsg = ControlFlowStateGraph::new(cfg, codes.as_slice(), mem);
     cfsg.main(&ctx);
     println!("{:?}", Dot::new(cfsg.get_graph()));
