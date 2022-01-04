@@ -3,7 +3,7 @@
 
 use crate::tests::{assert_json, find_value, new_test_context, pretty, TestContext};
 
-use diem_api_types::HexEncodedBytes;
+use diem_api_types::{HashValue, HexEncodedBytes};
 use diem_crypto::{
     hash::CryptoHash,
     multi_ed25519::{MultiEd25519PrivateKey, MultiEd25519PublicKey},
@@ -16,7 +16,7 @@ use diem_types::{
     account_config::{from_currency_code_string, xus_tag, XUS_NAME},
     transaction::{
         authenticator::{AuthenticationKey, TransactionAuthenticator},
-        ChangeSet, Script, ScriptFunction, Transaction, TransactionInfoTrait,
+        ChangeSet, Script, ScriptFunction, Transaction,
     },
     write_set::{WriteOp, WriteSetMut},
 };
@@ -27,6 +27,13 @@ use move_core_types::{
 };
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
 use serde_json::json;
+
+#[tokio::test]
+async fn test_deserialize_genesis_transaction() {
+    let context = new_test_context();
+    let resp = context.get("/transactions/0").await;
+    serde_json::from_value::<diem_api_types::Transaction>(resp).unwrap();
+}
 
 #[tokio::test]
 async fn test_get_transactions_output_genesis_transaction() {
@@ -47,7 +54,7 @@ async fn test_get_transactions_output_genesis_transaction() {
     assert_eq!(txn["hash"], info.transaction_hash().to_hex_literal());
     assert_eq!(
         txn["state_root_hash"],
-        info.state_root_hash().to_hex_literal()
+        info.state_change_hash().to_hex_literal()
     );
     assert_eq!(
         txn["event_root_hash"],
@@ -146,6 +153,24 @@ async fn test_get_transactions_output_genesis_transaction() {
             }
         }),
     );
+}
+
+#[tokio::test]
+async fn test_get_transactions_returns_last_page_when_start_version_is_not_specified() {
+    let mut context = new_test_context();
+
+    let mut tc = context.tc_account();
+    for _i in 0..20 {
+        let account = context.gen_account();
+        let txn = context.create_parent_vasp_by_account(&mut tc, &account);
+        context.commit_block(&vec![txn.clone()]).await;
+    }
+
+    let resp = context.get("/transactions").await;
+    let txns = resp.as_array().unwrap();
+    assert_eq!(25, txns.len());
+    assert_eq!("15", txns[0]["version"]);
+    assert_eq!("39", txns[24]["version"]);
 }
 
 #[tokio::test]
@@ -256,7 +281,7 @@ async fn test_get_transactions_output_user_transaction_with_script_function_payl
             "type": "block_metadata_transaction",
             "version": "1",
             "hash": metadata.transaction_hash().to_hex_literal(),
-            "state_root_hash": metadata.state_root_hash().to_hex_literal(),
+            "state_root_hash": metadata.state_change_hash().to_hex_literal(),
             "event_root_hash": metadata.event_root_hash().to_hex_literal(),
             "gas_used": metadata.gas_used().to_string(),
             "success": true,
@@ -266,6 +291,7 @@ async fn test_get_transactions_output_user_transaction_with_script_function_payl
             "previous_block_votes": [],
             "proposer": context.validator_owner.to_hex_literal(),
             "timestamp": metadata_txn.timestamp_usec().to_string(),
+            "accumulator_root_hash": HashValue::from(context.context.get_accumulator_root_hash(1).unwrap()).to_string(),
         }),
     );
 
@@ -286,7 +312,7 @@ async fn test_get_transactions_output_user_transaction_with_script_function_payl
             "type": "user_transaction",
             "version": "2",
             "hash": user_txn_info.transaction_hash().to_hex_literal(),
-            "state_root_hash": user_txn_info.state_root_hash().to_hex_literal(),
+            "state_root_hash": user_txn_info.state_change_hash().to_hex_literal(),
             "event_root_hash": user_txn_info.event_root_hash().to_hex_literal(),
             "gas_used": user_txn_info.gas_used().to_string(),
             "success": true,
@@ -327,6 +353,8 @@ async fn test_get_transactions_output_user_transaction_with_script_function_payl
                 "public_key": format!("0x{}", hex::encode(public_key.unvalidated().to_bytes())),
                 "signature": format!("0x{}", hex::encode(sig.to_bytes())),
             },
+            "timestamp": metadata_txn.timestamp_usec().to_string(),
+            "accumulator_root_hash": HashValue::from(context.context.get_accumulator_root_hash(2).unwrap()).to_string(),
         }),
     )
 }
@@ -785,7 +813,7 @@ async fn test_get_transaction_by_invalid_hash() {
 
     let resp = context
         .expect_status_code(400)
-        .get(&format!("/transactions/{}", "0x1",))
+        .get("/transactions/0x1")
         .await;
     assert_json(
         resp,

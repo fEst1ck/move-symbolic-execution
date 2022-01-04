@@ -5,34 +5,34 @@
 
 
 
--  [Resource `TokenData`](#0x1_NFT_TokenData)
--  [Struct `TokenDataWrapper`](#0x1_NFT_TokenDataWrapper)
 -  [Resource `Token`](#0x1_NFT_Token)
--  [Struct `MintEvent`](#0x1_NFT_MintEvent)
--  [Resource `Admin`](#0x1_NFT_Admin)
+-  [Resource `TokenData`](#0x1_NFT_TokenData)
 -  [Resource `TokenDataCollection`](#0x1_NFT_TokenDataCollection)
+-  [Struct `MintEvent`](#0x1_NFT_MintEvent)
+-  [Struct `TransferEvent`](#0x1_NFT_TransferEvent)
+-  [Resource `Admin`](#0x1_NFT_Admin)
 -  [Resource `CreationDelegation`](#0x1_NFT_CreationDelegation)
 -  [Constants](#@Constants_0)
+-  [Function `nft_initialize`](#0x1_NFT_nft_initialize)
 -  [Function `id`](#0x1_NFT_id)
--  [Function `balance`](#0x1_NFT_balance)
--  [Function `metadata`](#0x1_NFT_metadata)
--  [Function `parent`](#0x1_NFT_parent)
--  [Function `supply`](#0x1_NFT_supply)
--  [Function `extract_token`](#0x1_NFT_extract_token)
--  [Function `restore_token`](#0x1_NFT_restore_token)
+-  [Function `get_balance`](#0x1_NFT_get_balance)
+-  [Function `get_supply`](#0x1_NFT_get_supply)
+-  [Function `get_content_uri`](#0x1_NFT_get_content_uri)
+-  [Function `get_metadata`](#0x1_NFT_get_metadata)
+-  [Function `get_parent_id`](#0x1_NFT_get_parent_id)
+-  [Function `is_data_inlined`](#0x1_NFT_is_data_inlined)
 -  [Function `index_of_token`](#0x1_NFT_index_of_token)
 -  [Function `join`](#0x1_NFT_join)
--  [Function `split`](#0x1_NFT_split)
--  [Function `nft_initialize`](#0x1_NFT_nft_initialize)
+-  [Function `split_out`](#0x1_NFT_split_out)
 -  [Function `create_for`](#0x1_NFT_create_for)
 -  [Function `create`](#0x1_NFT_create)
 -  [Function `create_impl`](#0x1_NFT_create_impl)
 -  [Function `publish_token_data_collection`](#0x1_NFT_publish_token_data_collection)
 -  [Function `allow_creation_delegation`](#0x1_NFT_allow_creation_delegation)
+-  [Function `emit_transfer_event`](#0x1_NFT_emit_transfer_event)
 
 
-<pre><code><b>use</b> <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Errors.md#0x1_Errors">0x1::Errors</a>;
-<b>use</b> <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Event.md#0x1_Event">0x1::Event</a>;
+<pre><code><b>use</b> <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Event.md#0x1_Event">0x1::Event</a>;
 <b>use</b> <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID">0x1::GUID</a>;
 <b>use</b> <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option">0x1::Option</a>;
 <b>use</b> <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Signer.md#0x1_Signer">0x1::Signer</a>;
@@ -41,16 +41,21 @@
 
 
 
-<a name="0x1_NFT_TokenData"></a>
+<a name="0x1_NFT_Token"></a>
 
-## Resource `TokenData`
+## Resource `Token`
 
-Struct representing data of a specific token with token_id,
-stored under the creator's address inside TokenDataCollection.
-For each token_id, there is only one TokenData.
+Struct representing a semi-fungible or non-fungible token (depending on the supply).
+There can be multiple tokens with the same id (unless supply is 1). Each token's
+corresponding token metadata is stored inside a TokenData inside TokenDataCollection
+under the creator's address.
+The TokenData might be inlined together with the token in case the token is unique, i.e., its balance is 1
+(we might choose to extend inlining for the non-unique NFTs in future).
+The TokenData can also be separated out to a separate creator's collection in order to normalize the
+data layout: we'd want to keep a single instance of the token data in case its balance is large.
 
 
-<pre><code><b>struct</b> <a href="NFT.md#0x1_NFT_TokenData">TokenData</a>&lt;TokenType: store&gt; has store, key
+<pre><code><b>struct</b> <a href="NFT.md#0x1_NFT_Token">Token</a>&lt;TokenType: <b>copy</b>, drop, store&gt; <b>has</b> store, key
 </code></pre>
 
 
@@ -61,7 +66,49 @@ For each token_id, there is only one TokenData.
 
 <dl>
 <dt>
-<code>metadata: <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_Option">Option::Option</a>&lt;TokenType&gt;</code>
+<code>id: <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_ID">GUID::ID</a></code>
+</dt>
+<dd>
+
+</dd>
+<dt>
+<code>balance: u64</code>
+</dt>
+<dd>
+
+</dd>
+<dt>
+<code>token_data: <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_Option">Option::Option</a>&lt;<a href="NFT.md#0x1_NFT_TokenData">NFT::TokenData</a>&lt;TokenType&gt;&gt;</code>
+</dt>
+<dd>
+
+</dd>
+</dl>
+
+
+</details>
+
+<a name="0x1_NFT_TokenData"></a>
+
+## Resource `TokenData`
+
+Struct representing data of a specific token with token_id,
+stored under the creator's address inside TokenDataCollection.
+For each token_id, there is only one TokenData.
+
+
+<pre><code><b>struct</b> <a href="NFT.md#0x1_NFT_TokenData">TokenData</a>&lt;TokenType: <b>copy</b>, drop, store&gt; <b>has</b> store, key
+</code></pre>
+
+
+
+<details>
+<summary>Fields</summary>
+
+
+<dl>
+<dt>
+<code>metadata: TokenType</code>
 </dt>
 <dd>
 
@@ -95,17 +142,15 @@ For each token_id, there is only one TokenData.
 
 </details>
 
-<a name="0x1_NFT_TokenDataWrapper"></a>
+<a name="0x1_NFT_TokenDataCollection"></a>
 
-## Struct `TokenDataWrapper`
+## Resource `TokenDataCollection`
 
-A hot potato wrapper for the token's metadata. Since this wrapper has no <code>key</code> or <code>store</code>
-ability, it can't be stored in global storage. This wrapper can be safely passed outside
-of this module because we know it will have to come back to this module, where
-it will be unpacked.
+The data of the NFT tokens is either kept inline (in case their balance is 1), or is detached and kept
+in the token data collection by the original creator.
 
 
-<pre><code><b>struct</b> <a href="NFT.md#0x1_NFT_TokenDataWrapper">TokenDataWrapper</a>&lt;TokenType: store&gt;
+<pre><code><b>struct</b> <a href="NFT.md#0x1_NFT_TokenDataCollection">TokenDataCollection</a>&lt;TokenType: <b>copy</b>, drop, store&gt; <b>has</b> key
 </code></pre>
 
 
@@ -116,62 +161,7 @@ it will be unpacked.
 
 <dl>
 <dt>
-<code>origin: address</code>
-</dt>
-<dd>
-
-</dd>
-<dt>
-<code>index: u64</code>
-</dt>
-<dd>
-
-</dd>
-<dt>
-<code>metadata: TokenType</code>
-</dt>
-<dd>
-
-</dd>
-<dt>
-<code>parent_id: <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_Option">Option::Option</a>&lt;<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_ID">GUID::ID</a>&gt;</code>
-</dt>
-<dd>
-
-</dd>
-</dl>
-
-
-</details>
-
-<a name="0x1_NFT_Token"></a>
-
-## Resource `Token`
-
-Struct representing a semi-fungible or non-fungible token (depending on the supply).
-There can be multiple tokens with the same id (unless supply is 1). Each token's
-corresponding token metadata is stored inside a TokenData inside TokenDataCollection
-under the creator's address.
-
-
-<pre><code><b>struct</b> <a href="NFT.md#0x1_NFT_Token">Token</a>&lt;TokenType: store&gt; has store, key
-</code></pre>
-
-
-
-<details>
-<summary>Fields</summary>
-
-
-<dl>
-<dt>
-<code>id: <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_ID">GUID::ID</a></code>
-</dt>
-<dd>
-
-</dd>
-<dt>
-<code>balance: u64</code>
+<code>tokens: vector&lt;<a href="NFT.md#0x1_NFT_TokenData">NFT::TokenData</a>&lt;TokenType&gt;&gt;</code>
 </dt>
 <dd>
 
@@ -187,7 +177,7 @@ under the creator's address.
 
 
 
-<pre><code><b>struct</b> <a href="NFT.md#0x1_NFT_MintEvent">MintEvent</a> has <b>copy</b>, drop, store
+<pre><code><b>struct</b> <a href="NFT.md#0x1_NFT_MintEvent">MintEvent</a> <b>has</b> <b>copy</b>, drop, store
 </code></pre>
 
 
@@ -204,7 +194,7 @@ under the creator's address.
 
 </dd>
 <dt>
-<code>creator: address</code>
+<code>creator: <b>address</b></code>
 </dt>
 <dd>
 
@@ -226,13 +216,58 @@ under the creator's address.
 
 </details>
 
+<a name="0x1_NFT_TransferEvent"></a>
+
+## Struct `TransferEvent`
+
+
+
+<pre><code><b>struct</b> <a href="NFT.md#0x1_NFT_TransferEvent">TransferEvent</a> <b>has</b> <b>copy</b>, drop, store
+</code></pre>
+
+
+
+<details>
+<summary>Fields</summary>
+
+
+<dl>
+<dt>
+<code>id: <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_ID">GUID::ID</a></code>
+</dt>
+<dd>
+
+</dd>
+<dt>
+<code>from: <b>address</b></code>
+</dt>
+<dd>
+
+</dd>
+<dt>
+<code><b>to</b>: <b>address</b></code>
+</dt>
+<dd>
+
+</dd>
+<dt>
+<code>amount: u64</code>
+</dt>
+<dd>
+
+</dd>
+</dl>
+
+
+</details>
+
 <a name="0x1_NFT_Admin"></a>
 
 ## Resource `Admin`
 
 
 
-<pre><code><b>struct</b> <a href="NFT.md#0x1_NFT_Admin">Admin</a> has key
+<pre><code><b>struct</b> <a href="NFT.md#0x1_NFT_Admin">Admin</a> <b>has</b> key
 </code></pre>
 
 
@@ -248,29 +283,8 @@ under the creator's address.
 <dd>
 
 </dd>
-</dl>
-
-
-</details>
-
-<a name="0x1_NFT_TokenDataCollection"></a>
-
-## Resource `TokenDataCollection`
-
-
-
-<pre><code><b>struct</b> <a href="NFT.md#0x1_NFT_TokenDataCollection">TokenDataCollection</a>&lt;TokenType: store&gt; has key
-</code></pre>
-
-
-
-<details>
-<summary>Fields</summary>
-
-
-<dl>
 <dt>
-<code>tokens: vector&lt;<a href="NFT.md#0x1_NFT_TokenData">NFT::TokenData</a>&lt;TokenType&gt;&gt;</code>
+<code>transfer_events: <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Event.md#0x1_Event_EventHandle">Event::EventHandle</a>&lt;<a href="NFT.md#0x1_NFT_TransferEvent">NFT::TransferEvent</a>&gt;</code>
 </dt>
 <dd>
 
@@ -287,7 +301,7 @@ under the creator's address.
 Indicates that a user allows creation delegation for a given TokenType
 
 
-<pre><code><b>struct</b> <a href="NFT.md#0x1_NFT_CreationDelegation">CreationDelegation</a>&lt;TokenType: store&gt; has store, key
+<pre><code><b>struct</b> <a href="NFT.md#0x1_NFT_CreationDelegation">CreationDelegation</a>&lt;TokenType: <b>copy</b>, drop, store&gt; <b>has</b> store, key
 </code></pre>
 
 
@@ -326,7 +340,7 @@ Indicates that a user allows creation delegation for a given TokenType
 
 
 
-<pre><code><b>const</b> <a href="NFT.md#0x1_NFT_ADMIN">ADMIN</a>: address = a550c18;
+<pre><code><b>const</b> <a href="NFT.md#0x1_NFT_ADMIN">ADMIN</a>: <b>address</b> = a550c18;
 </code></pre>
 
 
@@ -355,6 +369,16 @@ Creation delegation for a given token type is not allowed.
 
 
 <pre><code><b>const</b> <a href="NFT.md#0x1_NFT_EINDEX_EXCEEDS_LENGTH">EINDEX_EXCEEDS_LENGTH</a>: u64 = 5;
+</code></pre>
+
+
+
+<a name="0x1_NFT_EINLINE_DATA_OP"></a>
+
+Trying to merge or split tokens with inlined data.
+
+
+<pre><code><b>const</b> <a href="NFT.md#0x1_NFT_EINLINE_DATA_OP">EINLINE_DATA_OP</a>: u64 = 10;
 </code></pre>
 
 
@@ -423,14 +447,14 @@ Function can only be called by the admin address
 
 
 
-<a name="0x1_NFT_id"></a>
+<a name="0x1_NFT_nft_initialize"></a>
 
-## Function `id`
+## Function `nft_initialize`
 
-Returns the id of given token
+Initialize this module
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_id">id</a>&lt;TokenType: store&gt;(token: &<a href="NFT.md#0x1_NFT_Token">NFT::Token</a>&lt;TokenType&gt;): <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_ID">GUID::ID</a>
+<pre><code><b>public</b>(<b>script</b>) <b>fun</b> <a href="NFT.md#0x1_NFT_nft_initialize">nft_initialize</a>(account: signer)
 </code></pre>
 
 
@@ -439,7 +463,36 @@ Returns the id of given token
 <summary>Implementation</summary>
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_id">id</a>&lt;TokenType: store&gt;(token: &<a href="NFT.md#0x1_NFT_Token">Token</a>&lt;TokenType&gt;): <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_ID">GUID::ID</a> {
+<pre><code><b>public</b>(<b>script</b>) <b>fun</b> <a href="NFT.md#0x1_NFT_nft_initialize">nft_initialize</a>(account: signer) {
+    <b>assert</b>!(<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Signer.md#0x1_Signer_address_of">Signer::address_of</a>(&account) == <a href="NFT.md#0x1_NFT_ADMIN">ADMIN</a>, <a href="NFT.md#0x1_NFT_ENOT_ADMIN">ENOT_ADMIN</a>);
+    <b>move_to</b>(&account, <a href="NFT.md#0x1_NFT_Admin">Admin</a> {
+        mint_events: <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Event.md#0x1_Event_new_event_handle">Event::new_event_handle</a>&lt;<a href="NFT.md#0x1_NFT_MintEvent">MintEvent</a>&gt;(&account),
+        transfer_events: <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Event.md#0x1_Event_new_event_handle">Event::new_event_handle</a>&lt;<a href="NFT.md#0x1_NFT_TransferEvent">TransferEvent</a>&gt;(&account),
+    })
+}
+</code></pre>
+
+
+
+</details>
+
+<a name="0x1_NFT_id"></a>
+
+## Function `id`
+
+Returns the id of given token
+
+
+<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_id">id</a>&lt;TokenType: <b>copy</b>, drop, store&gt;(token: &<a href="NFT.md#0x1_NFT_Token">NFT::Token</a>&lt;TokenType&gt;): <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_ID">GUID::ID</a>
+</code></pre>
+
+
+
+<details>
+<summary>Implementation</summary>
+
+
+<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_id">id</a>&lt;TokenType: <b>copy</b> + store + drop&gt;(token: &<a href="NFT.md#0x1_NFT_Token">Token</a>&lt;TokenType&gt;): <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_ID">GUID::ID</a> {
     *&token.id
 }
 </code></pre>
@@ -448,14 +501,14 @@ Returns the id of given token
 
 </details>
 
-<a name="0x1_NFT_balance"></a>
+<a name="0x1_NFT_get_balance"></a>
 
-## Function `balance`
+## Function `get_balance`
 
 Returns the balance of given token
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_balance">balance</a>&lt;TokenType: store&gt;(token: &<a href="NFT.md#0x1_NFT_Token">NFT::Token</a>&lt;TokenType&gt;): u64
+<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_get_balance">get_balance</a>&lt;TokenType: <b>copy</b>, drop, store&gt;(token: &<a href="NFT.md#0x1_NFT_Token">NFT::Token</a>&lt;TokenType&gt;): u64
 </code></pre>
 
 
@@ -464,7 +517,7 @@ Returns the balance of given token
 <summary>Implementation</summary>
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_balance">balance</a>&lt;TokenType: store&gt;(token: &<a href="NFT.md#0x1_NFT_Token">Token</a>&lt;TokenType&gt;): u64 {
+<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_get_balance">get_balance</a>&lt;TokenType: <b>copy</b> + store + drop&gt;(token: &<a href="NFT.md#0x1_NFT_Token">Token</a>&lt;TokenType&gt;): u64 {
     token.balance
 }
 </code></pre>
@@ -473,13 +526,14 @@ Returns the balance of given token
 
 </details>
 
-<a name="0x1_NFT_metadata"></a>
+<a name="0x1_NFT_get_supply"></a>
 
-## Function `metadata`
+## Function `get_supply`
+
+Returns the overall supply for the given token
 
 
-
-<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_metadata">metadata</a>&lt;TokenType: store&gt;(wrapper: &<a href="NFT.md#0x1_NFT_TokenDataWrapper">NFT::TokenDataWrapper</a>&lt;TokenType&gt;): &TokenType
+<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_get_supply">get_supply</a>&lt;TokenType: <b>copy</b>, drop, store&gt;(token: &<a href="NFT.md#0x1_NFT_Token">NFT::Token</a>&lt;TokenType&gt;): u64
 </code></pre>
 
 
@@ -488,8 +542,15 @@ Returns the balance of given token
 <summary>Implementation</summary>
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_metadata">metadata</a>&lt;TokenType: store&gt;(wrapper: &<a href="NFT.md#0x1_NFT_TokenDataWrapper">TokenDataWrapper</a>&lt;TokenType&gt;): &TokenType {
-    &wrapper.metadata
+<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_get_supply">get_supply</a>&lt;TokenType: <b>copy</b> + store + drop&gt;(token: &<a href="NFT.md#0x1_NFT_Token">Token</a>&lt;TokenType&gt;): u64 <b>acquires</b> <a href="NFT.md#0x1_NFT_TokenDataCollection">TokenDataCollection</a>{
+    <b>if</b> (<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_is_some">Option::is_some</a>(&token.token_data)) {
+        <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_borrow">Option::borrow</a>(&token.token_data).supply
+    } <b>else</b> {
+        <b>let</b> creator_addr = <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_id_creator_address">GUID::id_creator_address</a>(&token.id);
+        <b>let</b> creator_tokens_data = &<b>borrow_global</b>&lt;<a href="NFT.md#0x1_NFT_TokenDataCollection">TokenDataCollection</a>&lt;TokenType&gt;&gt;(creator_addr).tokens;
+        <b>let</b> token_data_idx = *<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_borrow">Option::borrow</a>(&<a href="NFT.md#0x1_NFT_index_of_token">index_of_token</a>&lt;TokenType&gt;(creator_tokens_data, &token.id));
+        <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Vector.md#0x1_Vector_borrow">Vector::borrow</a>(creator_tokens_data, token_data_idx).supply
+    }
 }
 </code></pre>
 
@@ -497,14 +558,14 @@ Returns the balance of given token
 
 </details>
 
-<a name="0x1_NFT_parent"></a>
+<a name="0x1_NFT_get_content_uri"></a>
 
-## Function `parent`
+## Function `get_content_uri`
 
-Returns ID of collection associated with token
+Returns a copy of the token content uri
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_parent">parent</a>&lt;TokenType: store&gt;(wrapper: &<a href="NFT.md#0x1_NFT_TokenDataWrapper">NFT::TokenDataWrapper</a>&lt;TokenType&gt;): &<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_Option">Option::Option</a>&lt;<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_ID">GUID::ID</a>&gt;
+<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_get_content_uri">get_content_uri</a>&lt;TokenType: <b>copy</b>, drop, store&gt;(token: &<a href="NFT.md#0x1_NFT_Token">NFT::Token</a>&lt;TokenType&gt;): vector&lt;u8&gt;
 </code></pre>
 
 
@@ -513,8 +574,15 @@ Returns ID of collection associated with token
 <summary>Implementation</summary>
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_parent">parent</a>&lt;TokenType: store&gt;(wrapper: &<a href="NFT.md#0x1_NFT_TokenDataWrapper">TokenDataWrapper</a>&lt;TokenType&gt;): &<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option">Option</a>&lt;<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_ID">GUID::ID</a>&gt; {
-    &wrapper.parent_id
+<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_get_content_uri">get_content_uri</a>&lt;TokenType: <b>copy</b> + store + drop&gt;(token: &<a href="NFT.md#0x1_NFT_Token">Token</a>&lt;TokenType&gt;): vector&lt;u8&gt; <b>acquires</b> <a href="NFT.md#0x1_NFT_TokenDataCollection">TokenDataCollection</a> {
+    <b>if</b> (<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_is_some">Option::is_some</a>(&token.token_data)) {
+        *&<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_borrow">Option::borrow</a>(&token.token_data).content_uri
+    } <b>else</b> {
+        <b>let</b> creator_addr = <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_id_creator_address">GUID::id_creator_address</a>(&token.id);
+        <b>let</b> creator_tokens_data = &<b>borrow_global</b>&lt;<a href="NFT.md#0x1_NFT_TokenDataCollection">TokenDataCollection</a>&lt;TokenType&gt;&gt;(creator_addr).tokens;
+        <b>let</b> token_data_idx = *<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_borrow">Option::borrow</a>(&<a href="NFT.md#0x1_NFT_index_of_token">index_of_token</a>&lt;TokenType&gt;(creator_tokens_data, &token.id));
+        *&<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Vector.md#0x1_Vector_borrow">Vector::borrow</a>(creator_tokens_data, token_data_idx).content_uri
+    }
 }
 </code></pre>
 
@@ -522,14 +590,14 @@ Returns ID of collection associated with token
 
 </details>
 
-<a name="0x1_NFT_supply"></a>
+<a name="0x1_NFT_get_metadata"></a>
 
-## Function `supply`
+## Function `get_metadata`
 
-Returns the supply of tokens with <code>id</code> on the chain.
+Returns a copy of the token metadata
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_supply">supply</a>&lt;TokenType: store&gt;(id: &<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_ID">GUID::ID</a>): u64
+<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_get_metadata">get_metadata</a>&lt;TokenType: <b>copy</b>, drop, store&gt;(token: &<a href="NFT.md#0x1_NFT_Token">NFT::Token</a>&lt;TokenType&gt;): TokenType
 </code></pre>
 
 
@@ -538,13 +606,15 @@ Returns the supply of tokens with <code>id</code> on the chain.
 <summary>Implementation</summary>
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_supply">supply</a>&lt;TokenType: store&gt;(id: &<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_ID">GUID::ID</a>): u64 <b>acquires</b> <a href="NFT.md#0x1_NFT_TokenDataCollection">TokenDataCollection</a> {
-    <b>let</b> owner_addr = <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_id_creator_address">GUID::id_creator_address</a>(id);
-    <b>let</b> tokens = &<b>mut</b> borrow_global_mut&lt;<a href="NFT.md#0x1_NFT_TokenDataCollection">TokenDataCollection</a>&lt;TokenType&gt;&gt;(owner_addr).tokens;
-    <b>let</b> index_opt = <a href="NFT.md#0x1_NFT_index_of_token">index_of_token</a>&lt;TokenType&gt;(tokens, id);
-    <b>assert</b>!(<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_is_some">Option::is_some</a>(&index_opt), <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Errors.md#0x1_Errors_invalid_argument">Errors::invalid_argument</a>(<a href="NFT.md#0x1_NFT_EWRONG_TOKEN_ID">EWRONG_TOKEN_ID</a>));
-    <b>let</b> index = <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_extract">Option::extract</a>(&<b>mut</b> index_opt);
-    <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Vector.md#0x1_Vector_borrow">Vector::borrow</a>(tokens, index).supply
+<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_get_metadata">get_metadata</a>&lt;TokenType: <b>copy</b> + store + drop&gt;(token: &<a href="NFT.md#0x1_NFT_Token">Token</a>&lt;TokenType&gt;): TokenType <b>acquires</b> <a href="NFT.md#0x1_NFT_TokenDataCollection">TokenDataCollection</a> {
+    <b>if</b> (<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_is_some">Option::is_some</a>(&token.token_data)) {
+        *&<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_borrow">Option::borrow</a>(&token.token_data).metadata
+    } <b>else</b> {
+        <b>let</b> creator_addr = <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_id_creator_address">GUID::id_creator_address</a>(&token.id);
+        <b>let</b> creator_tokens_data = &<b>borrow_global</b>&lt;<a href="NFT.md#0x1_NFT_TokenDataCollection">TokenDataCollection</a>&lt;TokenType&gt;&gt;(creator_addr).tokens;
+        <b>let</b> token_data_idx = *<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_borrow">Option::borrow</a>(&<a href="NFT.md#0x1_NFT_index_of_token">index_of_token</a>&lt;TokenType&gt;(creator_tokens_data, &token.id));
+        *&<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Vector.md#0x1_Vector_borrow">Vector::borrow</a>(creator_tokens_data, token_data_idx).metadata
+    }
 }
 </code></pre>
 
@@ -552,14 +622,14 @@ Returns the supply of tokens with <code>id</code> on the chain.
 
 </details>
 
-<a name="0x1_NFT_extract_token"></a>
+<a name="0x1_NFT_get_parent_id"></a>
 
-## Function `extract_token`
+## Function `get_parent_id`
 
-Extract the Token data of the given token into a hot potato wrapper.
+Returns a copy of the token metadata
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_extract_token">extract_token</a>&lt;TokenType: store&gt;(nft: &<a href="NFT.md#0x1_NFT_Token">NFT::Token</a>&lt;TokenType&gt;): <a href="NFT.md#0x1_NFT_TokenDataWrapper">NFT::TokenDataWrapper</a>&lt;TokenType&gt;
+<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_get_parent_id">get_parent_id</a>&lt;TokenType: <b>copy</b>, drop, store&gt;(token: &<a href="NFT.md#0x1_NFT_Token">NFT::Token</a>&lt;TokenType&gt;): <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_Option">Option::Option</a>&lt;<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_ID">GUID::ID</a>&gt;
 </code></pre>
 
 
@@ -568,17 +638,15 @@ Extract the Token data of the given token into a hot potato wrapper.
 <summary>Implementation</summary>
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_extract_token">extract_token</a>&lt;TokenType: store&gt;(nft: &<a href="NFT.md#0x1_NFT_Token">Token</a>&lt;TokenType&gt;): <a href="NFT.md#0x1_NFT_TokenDataWrapper">TokenDataWrapper</a>&lt;TokenType&gt; <b>acquires</b> <a href="NFT.md#0x1_NFT_TokenDataCollection">TokenDataCollection</a> {
-    <b>let</b> owner_addr = <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_id_creator_address">GUID::id_creator_address</a>(&nft.id);
-    <b>let</b> tokens = &<b>mut</b> borrow_global_mut&lt;<a href="NFT.md#0x1_NFT_TokenDataCollection">TokenDataCollection</a>&lt;TokenType&gt;&gt;(owner_addr).tokens;
-    <b>let</b> index_opt = <a href="NFT.md#0x1_NFT_index_of_token">index_of_token</a>&lt;TokenType&gt;(tokens, &nft.id);
-    <b>assert</b>!(<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_is_some">Option::is_some</a>(&index_opt), <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Errors.md#0x1_Errors_invalid_argument">Errors::invalid_argument</a>(<a href="NFT.md#0x1_NFT_EWRONG_TOKEN_ID">EWRONG_TOKEN_ID</a>));
-    <b>let</b> index = <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_extract">Option::extract</a>(&<b>mut</b> index_opt);
-    <b>let</b> item_opt = &<b>mut</b> <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Vector.md#0x1_Vector_borrow_mut">Vector::borrow_mut</a>(tokens, index).metadata;
-    <b>assert</b>!(<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_is_some">Option::is_some</a>(item_opt), <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Errors.md#0x1_Errors_invalid_state">Errors::invalid_state</a>(<a href="NFT.md#0x1_NFT_ETOKEN_EXTRACTED">ETOKEN_EXTRACTED</a>));
-    <b>let</b> metadata = <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_extract">Option::extract</a>(item_opt);
-    <b>let</b> parent_opt = &<b>mut</b> <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Vector.md#0x1_Vector_borrow_mut">Vector::borrow_mut</a>(tokens, index).parent_id;
-    <a href="NFT.md#0x1_NFT_TokenDataWrapper">TokenDataWrapper</a> { origin: owner_addr, index, metadata, parent_id: *parent_opt }
+<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_get_parent_id">get_parent_id</a>&lt;TokenType: <b>copy</b> + store + drop&gt;(token: &<a href="NFT.md#0x1_NFT_Token">Token</a>&lt;TokenType&gt;): <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option">Option</a>&lt;<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_ID">GUID::ID</a>&gt; <b>acquires</b> <a href="NFT.md#0x1_NFT_TokenDataCollection">TokenDataCollection</a> {
+    <b>if</b> (<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_is_some">Option::is_some</a>(&token.token_data)) {
+        *&<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_borrow">Option::borrow</a>(&token.token_data).parent_id
+    } <b>else</b> {
+        <b>let</b> creator_addr = <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_id_creator_address">GUID::id_creator_address</a>(&token.id);
+        <b>let</b> creator_tokens_data = &<b>borrow_global</b>&lt;<a href="NFT.md#0x1_NFT_TokenDataCollection">TokenDataCollection</a>&lt;TokenType&gt;&gt;(creator_addr).tokens;
+        <b>let</b> token_data_idx = *<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_borrow">Option::borrow</a>(&<a href="NFT.md#0x1_NFT_index_of_token">index_of_token</a>&lt;TokenType&gt;(creator_tokens_data, &token.id));
+        *&<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Vector.md#0x1_Vector_borrow">Vector::borrow</a>(creator_tokens_data, token_data_idx).parent_id
+    }
 }
 </code></pre>
 
@@ -586,14 +654,14 @@ Extract the Token data of the given token into a hot potato wrapper.
 
 </details>
 
-<a name="0x1_NFT_restore_token"></a>
+<a name="0x1_NFT_is_data_inlined"></a>
 
-## Function `restore_token`
+## Function `is_data_inlined`
 
-Restore the token in the wrapper back into global storage under original address.
+Returns true if the token is keeping the token data inlined.
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_restore_token">restore_token</a>&lt;TokenType: store&gt;(wrapper: <a href="NFT.md#0x1_NFT_TokenDataWrapper">NFT::TokenDataWrapper</a>&lt;TokenType&gt;)
+<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_is_data_inlined">is_data_inlined</a>&lt;TokenType: <b>copy</b>, drop, store&gt;(token: &<a href="NFT.md#0x1_NFT_Token">NFT::Token</a>&lt;TokenType&gt;): bool
 </code></pre>
 
 
@@ -602,13 +670,8 @@ Restore the token in the wrapper back into global storage under original address
 <summary>Implementation</summary>
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_restore_token">restore_token</a>&lt;TokenType: store&gt;(wrapper: <a href="NFT.md#0x1_NFT_TokenDataWrapper">TokenDataWrapper</a>&lt;TokenType&gt;) <b>acquires</b> <a href="NFT.md#0x1_NFT_TokenDataCollection">TokenDataCollection</a> {
-    <b>let</b> <a href="NFT.md#0x1_NFT_TokenDataWrapper">TokenDataWrapper</a> { origin, index, metadata, parent_id: _ } = wrapper;
-    <b>let</b> tokens = &<b>mut</b> borrow_global_mut&lt;<a href="NFT.md#0x1_NFT_TokenDataCollection">TokenDataCollection</a>&lt;TokenType&gt;&gt;(origin).tokens;
-    <b>assert</b>!(<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Vector.md#0x1_Vector_length">Vector::length</a>(tokens) &gt; index, <a href="NFT.md#0x1_NFT_EINDEX_EXCEEDS_LENGTH">EINDEX_EXCEEDS_LENGTH</a>);
-    <b>let</b> item_opt = &<b>mut</b> <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Vector.md#0x1_Vector_borrow_mut">Vector::borrow_mut</a>(tokens, index).metadata;
-    <b>assert</b>!(<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_is_none">Option::is_none</a>(item_opt), <a href="NFT.md#0x1_NFT_ETOKEN_PRESENT">ETOKEN_PRESENT</a>);
-    <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_fill">Option::fill</a>(item_opt, metadata);
+<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_is_data_inlined">is_data_inlined</a>&lt;TokenType: <b>copy</b> + store + drop&gt;(token: &<a href="NFT.md#0x1_NFT_Token">Token</a>&lt;TokenType&gt;): bool {
+    <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_is_some">Option::is_some</a>(&token.token_data)
 }
 </code></pre>
 
@@ -623,7 +686,7 @@ Restore the token in the wrapper back into global storage under original address
 Finds the index of token with the given id in the gallery.
 
 
-<pre><code><b>fun</b> <a href="NFT.md#0x1_NFT_index_of_token">index_of_token</a>&lt;TokenType: store&gt;(gallery: &vector&lt;<a href="NFT.md#0x1_NFT_TokenData">NFT::TokenData</a>&lt;TokenType&gt;&gt;, id: &<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_ID">GUID::ID</a>): <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_Option">Option::Option</a>&lt;u64&gt;
+<pre><code><b>fun</b> <a href="NFT.md#0x1_NFT_index_of_token">index_of_token</a>&lt;TokenType: <b>copy</b>, drop, store&gt;(gallery: &vector&lt;<a href="NFT.md#0x1_NFT_TokenData">NFT::TokenData</a>&lt;TokenType&gt;&gt;, id: &<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_ID">GUID::ID</a>): <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_Option">Option::Option</a>&lt;u64&gt;
 </code></pre>
 
 
@@ -632,7 +695,7 @@ Finds the index of token with the given id in the gallery.
 <summary>Implementation</summary>
 
 
-<pre><code><b>fun</b> <a href="NFT.md#0x1_NFT_index_of_token">index_of_token</a>&lt;TokenType: store&gt;(gallery: &vector&lt;<a href="NFT.md#0x1_NFT_TokenData">TokenData</a>&lt;TokenType&gt;&gt;, id: &<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_ID">GUID::ID</a>): <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option">Option</a>&lt;u64&gt; {
+<pre><code><b>fun</b> <a href="NFT.md#0x1_NFT_index_of_token">index_of_token</a>&lt;TokenType: <b>copy</b> + store + drop&gt;(gallery: &vector&lt;<a href="NFT.md#0x1_NFT_TokenData">TokenData</a>&lt;TokenType&gt;&gt;, id: &<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_ID">GUID::ID</a>): <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option">Option</a>&lt;u64&gt; {
     <b>let</b> i = 0;
     <b>let</b> len = <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Vector.md#0x1_Vector_length">Vector::length</a>(gallery);
     <b>while</b> (i &lt; len) {
@@ -653,10 +716,10 @@ Finds the index of token with the given id in the gallery.
 
 ## Function `join`
 
-Join two tokens and return a new token with the combined value of the two.
+Adds the balance of <code>TokenID</code> to the balance of the given <code><a href="NFT.md#0x1_NFT_Token">Token</a></code>.
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_join">join</a>&lt;TokenType: store&gt;(token: &<b>mut</b> <a href="NFT.md#0x1_NFT_Token">NFT::Token</a>&lt;TokenType&gt;, other: <a href="NFT.md#0x1_NFT_Token">NFT::Token</a>&lt;TokenType&gt;)
+<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_join">join</a>&lt;TokenType: <b>copy</b>, drop, store&gt;(token: &<b>mut</b> <a href="NFT.md#0x1_NFT_Token">NFT::Token</a>&lt;TokenType&gt;, other: <a href="NFT.md#0x1_NFT_Token">NFT::Token</a>&lt;TokenType&gt;)
 </code></pre>
 
 
@@ -665,11 +728,14 @@ Join two tokens and return a new token with the combined value of the two.
 <summary>Implementation</summary>
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_join">join</a>&lt;TokenType: store&gt;(token: &<b>mut</b> <a href="NFT.md#0x1_NFT_Token">Token</a>&lt;TokenType&gt;, other: <a href="NFT.md#0x1_NFT_Token">Token</a>&lt;TokenType&gt;) {
-    <b>let</b> <a href="NFT.md#0x1_NFT_Token">Token</a> { id, balance } = other;
+<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_join">join</a>&lt;TokenType: <b>copy</b> + store + drop&gt;(token: &<b>mut</b> <a href="NFT.md#0x1_NFT_Token">Token</a>&lt;TokenType&gt;, other: <a href="NFT.md#0x1_NFT_Token">Token</a>&lt;TokenType&gt;) {
+    <b>let</b> <a href="NFT.md#0x1_NFT_Token">Token</a> { id, balance, token_data } = other;
+    // Inlining is allowed for single-token NFTs only.
+    <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_destroy_none">Option::destroy_none</a>(token_data); // aborts in case token data is not None
+    <b>assert</b>!(<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_is_none">Option::is_none</a>(&token.token_data), <a href="NFT.md#0x1_NFT_EINLINE_DATA_OP">EINLINE_DATA_OP</a>);
     <b>assert</b>!(*&token.id == id, <a href="NFT.md#0x1_NFT_EWRONG_TOKEN_ID">EWRONG_TOKEN_ID</a>);
     <b>assert</b>!(<a href="NFT.md#0x1_NFT_MAX_U64">MAX_U64</a> - token.balance &gt;= balance, <a href="NFT.md#0x1_NFT_ETOKEN_BALANCE_OVERFLOWS">ETOKEN_BALANCE_OVERFLOWS</a>);
-    token.balance = token.balance + balance
+    token.balance = token.balance + balance;
 }
 </code></pre>
 
@@ -677,14 +743,15 @@ Join two tokens and return a new token with the combined value of the two.
 
 </details>
 
-<a name="0x1_NFT_split"></a>
+<a name="0x1_NFT_split_out"></a>
 
-## Function `split`
+## Function `split_out`
 
-Split the token into two tokens, one with balance <code>amount</code> and the other one with balance
+Split out a new token with the given amount from the original token.
+Aborts in case amount is greater or equal than the given token balance.
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_split">split</a>&lt;TokenType: store&gt;(token: <a href="NFT.md#0x1_NFT_Token">NFT::Token</a>&lt;TokenType&gt;, amount: u64): (<a href="NFT.md#0x1_NFT_Token">NFT::Token</a>&lt;TokenType&gt;, <a href="NFT.md#0x1_NFT_Token">NFT::Token</a>&lt;TokenType&gt;)
+<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_split_out">split_out</a>&lt;TokenType: <b>copy</b>, drop, store&gt;(token: &<b>mut</b> <a href="NFT.md#0x1_NFT_Token">NFT::Token</a>&lt;TokenType&gt;, amount: u64): <a href="NFT.md#0x1_NFT_Token">NFT::Token</a>&lt;TokenType&gt;
 </code></pre>
 
 
@@ -693,43 +760,16 @@ Split the token into two tokens, one with balance <code>amount</code> and the ot
 <summary>Implementation</summary>
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_split">split</a>&lt;TokenType: store&gt;(token: <a href="NFT.md#0x1_NFT_Token">Token</a>&lt;TokenType&gt;, amount: u64): (<a href="NFT.md#0x1_NFT_Token">Token</a>&lt;TokenType&gt;, <a href="NFT.md#0x1_NFT_Token">Token</a>&lt;TokenType&gt;) {
+<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_split_out">split_out</a>&lt;TokenType: <b>copy</b> + store + drop&gt;(token: &<b>mut</b> <a href="NFT.md#0x1_NFT_Token">Token</a>&lt;TokenType&gt;, amount: u64): <a href="NFT.md#0x1_NFT_Token">Token</a>&lt;TokenType&gt; {
     <b>assert</b>!(token.balance &gt;= amount, <a href="NFT.md#0x1_NFT_EAMOUNT_EXCEEDS_TOKEN_BALANCE">EAMOUNT_EXCEEDS_TOKEN_BALANCE</a>);
+    <b>assert</b>!(<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_is_none">Option::is_none</a>(&token.token_data), <a href="NFT.md#0x1_NFT_EINLINE_DATA_OP">EINLINE_DATA_OP</a>);
+
     token.balance = token.balance - amount;
-    <b>let</b> id = *&token.id;
-    (token,
-        <a href="NFT.md#0x1_NFT_Token">Token</a> {
-            id,
-            balance: amount
-        } )
-}
-</code></pre>
-
-
-
-</details>
-
-<a name="0x1_NFT_nft_initialize"></a>
-
-## Function `nft_initialize`
-
-Initialize this module
-
-
-<pre><code><b>public</b>(<b>script</b>) <b>fun</b> <a href="NFT.md#0x1_NFT_nft_initialize">nft_initialize</a>(account: signer)
-</code></pre>
-
-
-
-<details>
-<summary>Implementation</summary>
-
-
-<pre><code><b>public</b>(<b>script</b>) <b>fun</b> <a href="NFT.md#0x1_NFT_nft_initialize">nft_initialize</a>(account: signer) {
-    <b>assert</b>!(<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Signer.md#0x1_Signer_address_of">Signer::address_of</a>(&account) == <a href="NFT.md#0x1_NFT_ADMIN">ADMIN</a>, <a href="NFT.md#0x1_NFT_ENOT_ADMIN">ENOT_ADMIN</a>);
-    move_to(&account, <a href="NFT.md#0x1_NFT_Admin">Admin</a> {
-        mint_events: <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Event.md#0x1_Event_new_event_handle">Event::new_event_handle</a>&lt;<a href="NFT.md#0x1_NFT_MintEvent">MintEvent</a>&gt;(&account),
-    })
+    <a href="NFT.md#0x1_NFT_Token">Token</a> {
+        id: *&token.id,
+        balance: amount,
+        token_data: <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_none">Option::none</a>(),
+    }
 }
 </code></pre>
 
@@ -746,7 +786,7 @@ NFT type.
 Only the entity, which can create an object of <code>TokenType</code>, will be able to call this function.
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_create_for">create_for</a>&lt;TokenType: store&gt;(creator: address, metadata: TokenType, content_uri: vector&lt;u8&gt;, amount: u64, parent_id: <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_Option">Option::Option</a>&lt;<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_ID">GUID::ID</a>&gt;): <a href="NFT.md#0x1_NFT_Token">NFT::Token</a>&lt;TokenType&gt;
+<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_create_for">create_for</a>&lt;TokenType: <b>copy</b>, drop, store&gt;(creator: <b>address</b>, metadata: TokenType, content_uri: vector&lt;u8&gt;, amount: u64, parent_id: <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_Option">Option::Option</a>&lt;<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_ID">GUID::ID</a>&gt;): <a href="NFT.md#0x1_NFT_Token">NFT::Token</a>&lt;TokenType&gt;
 </code></pre>
 
 
@@ -755,11 +795,11 @@ Only the entity, which can create an object of <code>TokenType</code>, will be a
 <summary>Implementation</summary>
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_create_for">create_for</a>&lt;TokenType: store&gt;(
-    creator: address, metadata: TokenType, content_uri: vector&lt;u8&gt;, amount: u64, parent_id: <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option">Option</a>&lt;<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_ID">GUID::ID</a>&gt;
+<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_create_for">create_for</a>&lt;TokenType: <b>copy</b> + store + drop&gt;(
+    creator: <b>address</b>, metadata: TokenType, content_uri: vector&lt;u8&gt;, amount: u64, parent_id: <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option">Option</a>&lt;<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_ID">GUID::ID</a>&gt;
 ): <a href="NFT.md#0x1_NFT_Token">Token</a>&lt;TokenType&gt; <b>acquires</b> <a href="NFT.md#0x1_NFT_CreationDelegation">CreationDelegation</a>, <a href="NFT.md#0x1_NFT_Admin">Admin</a>, <a href="NFT.md#0x1_NFT_TokenDataCollection">TokenDataCollection</a> {
     <b>assert</b>! (<b>exists</b>&lt;<a href="NFT.md#0x1_NFT_CreationDelegation">CreationDelegation</a>&lt;TokenType&gt;&gt;(creator), <a href="NFT.md#0x1_NFT_ECREATION_DELEGATION_NOT_ALLOWED">ECREATION_DELEGATION_NOT_ALLOWED</a>);
-    <b>let</b> guid_creation_cap = &borrow_global&lt;<a href="NFT.md#0x1_NFT_CreationDelegation">CreationDelegation</a>&lt;TokenType&gt;&gt;(creator).guid_capability;
+    <b>let</b> guid_creation_cap = &<b>borrow_global</b>&lt;<a href="NFT.md#0x1_NFT_CreationDelegation">CreationDelegation</a>&lt;TokenType&gt;&gt;(creator).guid_capability;
     <b>let</b> guid = <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_create_with_capability">GUID::create_with_capability</a>(creator, guid_creation_cap);
     <a href="NFT.md#0x1_NFT_create_impl">create_impl</a>&lt;TokenType&gt;(
         creator,
@@ -783,7 +823,7 @@ Only the entity, which can create an object of <code>TokenType</code>, will be a
 Create a<code> <a href="NFT.md#0x1_NFT_TokenData">TokenData</a>&lt;TokenType&gt;</code> that wraps <code>metadata</code> and with balance of <code>amount</code>
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_create">create</a>&lt;TokenType: store&gt;(account: &signer, metadata: TokenType, content_uri: vector&lt;u8&gt;, amount: u64, parent_id: <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_Option">Option::Option</a>&lt;<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_ID">GUID::ID</a>&gt;): <a href="NFT.md#0x1_NFT_Token">NFT::Token</a>&lt;TokenType&gt;
+<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_create">create</a>&lt;TokenType: <b>copy</b>, drop, store&gt;(account: &signer, metadata: TokenType, content_uri: vector&lt;u8&gt;, amount: u64, parent_id: <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_Option">Option::Option</a>&lt;<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_ID">GUID::ID</a>&gt;): <a href="NFT.md#0x1_NFT_Token">NFT::Token</a>&lt;TokenType&gt;
 </code></pre>
 
 
@@ -792,12 +832,12 @@ Create a<code> <a href="NFT.md#0x1_NFT_TokenData">TokenData</a>&lt;TokenType&gt;
 <summary>Implementation</summary>
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_create">create</a>&lt;TokenType: store&gt;(
+<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_create">create</a>&lt;TokenType: <b>copy</b> + store + drop&gt;(
     account: &signer, metadata: TokenType, content_uri: vector&lt;u8&gt;, amount: u64, parent_id: <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option">Option</a>&lt;<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_ID">GUID::ID</a>&gt;
 ): <a href="NFT.md#0x1_NFT_Token">Token</a>&lt;TokenType&gt; <b>acquires</b> <a href="NFT.md#0x1_NFT_Admin">Admin</a>, <a href="NFT.md#0x1_NFT_TokenDataCollection">TokenDataCollection</a> {
     <b>let</b> guid = <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_create">GUID::create</a>(account);
     <b>if</b> (!<b>exists</b>&lt;<a href="NFT.md#0x1_NFT_TokenDataCollection">TokenDataCollection</a>&lt;TokenType&gt;&gt;(<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Signer.md#0x1_Signer_address_of">Signer::address_of</a>(account))) {
-        move_to(account, <a href="NFT.md#0x1_NFT_TokenDataCollection">TokenDataCollection</a> { tokens: <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Vector.md#0x1_Vector_empty">Vector::empty</a>&lt;<a href="NFT.md#0x1_NFT_TokenData">TokenData</a>&lt;TokenType&gt;&gt;() });
+        <b>move_to</b>(account, <a href="NFT.md#0x1_NFT_TokenDataCollection">TokenDataCollection</a> { tokens: <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Vector.md#0x1_Vector_empty">Vector::empty</a>&lt;<a href="NFT.md#0x1_NFT_TokenData">TokenData</a>&lt;TokenType&gt;&gt;() });
     };
     <a href="NFT.md#0x1_NFT_create_impl">create_impl</a>&lt;TokenType&gt;(
         <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Signer.md#0x1_Signer_address_of">Signer::address_of</a>(account),
@@ -820,7 +860,7 @@ Create a<code> <a href="NFT.md#0x1_NFT_TokenData">TokenData</a>&lt;TokenType&gt;
 
 
 
-<pre><code><b>fun</b> <a href="NFT.md#0x1_NFT_create_impl">create_impl</a>&lt;TokenType: store&gt;(addr: address, guid: <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_GUID">GUID::GUID</a>, metadata: TokenType, content_uri: vector&lt;u8&gt;, amount: u64, parent_id: <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_Option">Option::Option</a>&lt;<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_ID">GUID::ID</a>&gt;): <a href="NFT.md#0x1_NFT_Token">NFT::Token</a>&lt;TokenType&gt;
+<pre><code><b>fun</b> <a href="NFT.md#0x1_NFT_create_impl">create_impl</a>&lt;TokenType: <b>copy</b>, drop, store&gt;(addr: <b>address</b>, guid: <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_GUID">GUID::GUID</a>, metadata: TokenType, content_uri: vector&lt;u8&gt;, amount: u64, parent_id: <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_Option">Option::Option</a>&lt;<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_ID">GUID::ID</a>&gt;): <a href="NFT.md#0x1_NFT_Token">NFT::Token</a>&lt;TokenType&gt;
 </code></pre>
 
 
@@ -829,22 +869,16 @@ Create a<code> <a href="NFT.md#0x1_NFT_TokenData">TokenData</a>&lt;TokenType&gt;
 <summary>Implementation</summary>
 
 
-<pre><code><b>fun</b> <a href="NFT.md#0x1_NFT_create_impl">create_impl</a>&lt;TokenType: store&gt;(
-    addr: address,
+<pre><code><b>fun</b> <a href="NFT.md#0x1_NFT_create_impl">create_impl</a>&lt;TokenType: <b>copy</b> + store + drop&gt;(
+    addr: <b>address</b>,
     guid: <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_GUID">GUID::GUID</a>,
     metadata: TokenType,
     content_uri: vector&lt;u8&gt;,
     amount: u64,
     parent_id: <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option">Option</a>&lt;<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_ID">GUID::ID</a>&gt;
 ): <a href="NFT.md#0x1_NFT_Token">Token</a>&lt;TokenType&gt; <b>acquires</b> <a href="NFT.md#0x1_NFT_Admin">Admin</a>, <a href="NFT.md#0x1_NFT_TokenDataCollection">TokenDataCollection</a> {
-    // If there is a parent, ensure it has the same creator
-    // TODO: Do we just say the owner has the ability instead?
-    <b>if</b> (<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_is_some">Option::is_some</a>(&parent_id)) {
-        <b>let</b> parent_id = <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_borrow">Option::borrow</a>(&<b>mut</b> parent_id);
-        <b>assert</b>!(<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_creator_address">GUID::creator_address</a>(&guid) == <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_id_creator_address">GUID::id_creator_address</a>(parent_id), <a href="NFT.md#0x1_NFT_EPARENT_NOT_SAME_ACCOUNT">EPARENT_NOT_SAME_ACCOUNT</a>);
-    };
     <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Event.md#0x1_Event_emit_event">Event::emit_event</a>(
-        &<b>mut</b> borrow_global_mut&lt;<a href="NFT.md#0x1_NFT_Admin">Admin</a>&gt;(<a href="NFT.md#0x1_NFT_ADMIN">ADMIN</a>).mint_events,
+        &<b>mut</b> <b>borrow_global_mut</b>&lt;<a href="NFT.md#0x1_NFT_Admin">Admin</a>&gt;(<a href="NFT.md#0x1_NFT_ADMIN">ADMIN</a>).mint_events,
         <a href="NFT.md#0x1_NFT_MintEvent">MintEvent</a> {
             id: <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_id">GUID::id</a>(&guid),
             creator: addr,
@@ -853,12 +887,16 @@ Create a<code> <a href="NFT.md#0x1_NFT_TokenData">TokenData</a>&lt;TokenType&gt;
         }
     );
     <b>let</b> id = <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_id">GUID::id</a>(&guid);
-    <b>let</b> token_data_collection = &<b>mut</b> borrow_global_mut&lt;<a href="NFT.md#0x1_NFT_TokenDataCollection">TokenDataCollection</a>&lt;TokenType&gt;&gt;(addr).tokens;
-    <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Vector.md#0x1_Vector_push_back">Vector::push_back</a>(
-        token_data_collection,
-        <a href="NFT.md#0x1_NFT_TokenData">TokenData</a> { metadata: <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_some">Option::some</a>(metadata), token_id: guid, content_uri, supply: amount, parent_id }
-    );
-    <a href="NFT.md#0x1_NFT_Token">Token</a> { id, balance: amount }
+    <b>let</b> token_data = <a href="NFT.md#0x1_NFT_TokenData">TokenData</a> { metadata, token_id: guid, content_uri, supply: amount, parent_id };
+    <b>if</b> (amount == 1) {
+        // inline token data
+        <a href="NFT.md#0x1_NFT_Token">Token</a> { id, balance: amount, token_data: <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_some">Option::some</a>(token_data) }
+    } <b>else</b> {
+        // keep token data in the collection of the creator
+        <b>let</b> token_data_collection = &<b>mut</b> <b>borrow_global_mut</b>&lt;<a href="NFT.md#0x1_NFT_TokenDataCollection">TokenDataCollection</a>&lt;TokenType&gt;&gt;(addr).tokens;
+        <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Vector.md#0x1_Vector_push_back">Vector::push_back</a>(token_data_collection, token_data);
+        <a href="NFT.md#0x1_NFT_Token">Token</a> { id, balance: amount, token_data: <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Option.md#0x1_Option_none">Option::none</a>() }
+    }
 }
 </code></pre>
 
@@ -872,7 +910,7 @@ Create a<code> <a href="NFT.md#0x1_NFT_TokenData">TokenData</a>&lt;TokenType&gt;
 
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_publish_token_data_collection">publish_token_data_collection</a>&lt;TokenType: store&gt;(account: &signer)
+<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_publish_token_data_collection">publish_token_data_collection</a>&lt;TokenType: <b>copy</b>, drop, store&gt;(account: &signer)
 </code></pre>
 
 
@@ -881,12 +919,12 @@ Create a<code> <a href="NFT.md#0x1_NFT_TokenData">TokenData</a>&lt;TokenType&gt;
 <summary>Implementation</summary>
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_publish_token_data_collection">publish_token_data_collection</a>&lt;TokenType: store&gt;(account: &signer) {
+<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_publish_token_data_collection">publish_token_data_collection</a>&lt;TokenType: <b>copy</b> + store + drop&gt;(account: &signer) {
     <b>assert</b>!(
         !<b>exists</b>&lt;<a href="NFT.md#0x1_NFT_TokenDataCollection">TokenDataCollection</a>&lt;TokenType&gt;&gt;(<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Signer.md#0x1_Signer_address_of">Signer::address_of</a>(account)),
         <a href="NFT.md#0x1_NFT_ETOKEN_DATA_COLLECTION_ALREADY_PUBLISHED">ETOKEN_DATA_COLLECTION_ALREADY_PUBLISHED</a>
     );
-    move_to(account, <a href="NFT.md#0x1_NFT_TokenDataCollection">TokenDataCollection</a>&lt;TokenType&gt; { tokens: <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Vector.md#0x1_Vector_empty">Vector::empty</a>() });
+    <b>move_to</b>(account, <a href="NFT.md#0x1_NFT_TokenDataCollection">TokenDataCollection</a>&lt;TokenType&gt; { tokens: <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Vector.md#0x1_Vector_empty">Vector::empty</a>() });
 }
 </code></pre>
 
@@ -903,7 +941,7 @@ is going to be allowed to create an NFT on behalf of the user).
 This is useful in case a user is using a 3rd party app, which can create NFTs on their behalf.
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_allow_creation_delegation">allow_creation_delegation</a>&lt;TokenType: store&gt;(account: &signer)
+<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_allow_creation_delegation">allow_creation_delegation</a>&lt;TokenType: <b>copy</b>, drop, store&gt;(account: &signer)
 </code></pre>
 
 
@@ -912,14 +950,51 @@ This is useful in case a user is using a 3rd party app, which can create NFTs on
 <summary>Implementation</summary>
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_allow_creation_delegation">allow_creation_delegation</a>&lt;TokenType: store&gt;(account: &signer) {
+<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_allow_creation_delegation">allow_creation_delegation</a>&lt;TokenType: <b>copy</b> + store + drop&gt;(account: &signer) {
     <b>if</b> (!<b>exists</b>&lt;<a href="NFT.md#0x1_NFT_CreationDelegation">CreationDelegation</a>&lt;TokenType&gt;&gt;(<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Signer.md#0x1_Signer_address_of">Signer::address_of</a>(account))) {
-        move_to(account, <a href="NFT.md#0x1_NFT_CreationDelegation">CreationDelegation</a>&lt;TokenType&gt; { guid_capability: <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_gen_create_capability">GUID::gen_create_capability</a>(account) });
+        <b>move_to</b>(account, <a href="NFT.md#0x1_NFT_CreationDelegation">CreationDelegation</a>&lt;TokenType&gt; { guid_capability: <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_gen_create_capability">GUID::gen_create_capability</a>(account) });
         // In order <b>to</b> support creation delegation, prepare the token data collection ahead of time.
         <b>if</b> (!<b>exists</b>&lt;<a href="NFT.md#0x1_NFT_TokenDataCollection">TokenDataCollection</a>&lt;TokenType&gt;&gt;(<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Signer.md#0x1_Signer_address_of">Signer::address_of</a>(account))) {
-            move_to(account, <a href="NFT.md#0x1_NFT_TokenDataCollection">TokenDataCollection</a> { tokens: <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Vector.md#0x1_Vector_empty">Vector::empty</a>&lt;<a href="NFT.md#0x1_NFT_TokenData">TokenData</a>&lt;TokenType&gt;&gt;() });
+            <b>move_to</b>(account, <a href="NFT.md#0x1_NFT_TokenDataCollection">TokenDataCollection</a> { tokens: <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Vector.md#0x1_Vector_empty">Vector::empty</a>&lt;<a href="NFT.md#0x1_NFT_TokenData">TokenData</a>&lt;TokenType&gt;&gt;() });
         };
     };
+}
+</code></pre>
+
+
+
+</details>
+
+<a name="0x1_NFT_emit_transfer_event"></a>
+
+## Function `emit_transfer_event`
+
+
+
+<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_emit_transfer_event">emit_transfer_event</a>(guid: &<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_ID">GUID::ID</a>, account: &signer, <b>to</b>: <b>address</b>, amount: u64)
+</code></pre>
+
+
+
+<details>
+<summary>Implementation</summary>
+
+
+<pre><code><b>public</b> <b>fun</b> <a href="NFT.md#0x1_NFT_emit_transfer_event">emit_transfer_event</a>(
+    guid: &<a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/GUID.md#0x1_GUID_ID">GUID::ID</a>,
+    account: &signer,
+    <b>to</b>: <b>address</b>,
+    amount: u64,
+) <b>acquires</b> <a href="NFT.md#0x1_NFT_Admin">Admin</a> {
+    <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Event.md#0x1_Event_emit_event">Event::emit_event</a>(
+        &<b>mut</b> <b>borrow_global_mut</b>&lt;<a href="NFT.md#0x1_NFT_Admin">Admin</a>&gt;(<a href="NFT.md#0x1_NFT_ADMIN">ADMIN</a>).transfer_events,
+        <a href="NFT.md#0x1_NFT_TransferEvent">TransferEvent</a> {
+            id: *guid,
+            from: <a href="../../../../../../../experimental/releases/artifacts/current/build/MoveStdlib/docs/Signer.md#0x1_Signer_address_of">Signer::address_of</a>(account),
+            <b>to</b>: <b>to</b>,
+            amount: amount,
+        }
+    );
 }
 </code></pre>
 

@@ -3,7 +3,7 @@
 
 use crate::{data_notification::NotificationId, data_stream::DataStreamListener, error::Error};
 use async_trait::async_trait;
-use diem_types::transaction::Version;
+use diem_types::{ledger_info::LedgerInfoWithSignatures, transaction::Version};
 use futures::{
     channel::{mpsc, oneshot},
     stream::FusedStream,
@@ -47,26 +47,54 @@ pub trait DataStreamingClient {
         start_epoch: Epoch,
     ) -> Result<DataStreamListener, Error>;
 
-    /// Fetches all transactions with proofs from `start_version` to
-    /// `end_version` (inclusive), where the proof versions can be up to the
-    /// specified `max_proof_version` (inclusive). If `include_events` is true,
-    /// events are also included in the proofs.
-    async fn get_all_transactions(
-        &self,
-        start_version: Version,
-        end_version: Version,
-        max_proof_version: Version,
-        include_events: bool,
-    ) -> Result<DataStreamListener, Error>;
-
     /// Fetches all transaction outputs with proofs from `start_version` to
-    /// `end_version` (inclusive), where the proof versions can be up to the
-    /// specified `max_proof_version` (inclusive).
+    /// `end_version` (inclusive) at the specified `proof_version`.
     async fn get_all_transaction_outputs(
         &self,
         start_version: Version,
         end_version: Version,
-        max_proof_version: Version,
+        proof_version: Version,
+    ) -> Result<DataStreamListener, Error>;
+
+    /// Fetches all transactions with proofs from `start_version` to
+    /// `end_version` (inclusive) at the specified `proof_version`. If
+    /// `include_events` is true, events are also included in the proofs.
+    async fn get_all_transactions(
+        &self,
+        start_version: Version,
+        end_version: Version,
+        proof_version: Version,
+        include_events: bool,
+    ) -> Result<DataStreamListener, Error>;
+
+    /// Continuously streams transaction outputs with proofs as the blockchain
+    /// grows. The stream starts at `start_version` and `start_epoch` (inclusive).
+    /// Transaction output proof versions are tied to ledger infos within the
+    /// same epoch, otherwise epoch ending ledger infos will signify epoch changes.
+    ///
+    /// Note: if a `target` is provided, the stream will terminate once it reaches
+    /// the target. Otherwise, it will continue indefinitely.
+    async fn continuously_stream_transaction_outputs(
+        &self,
+        start_version: Version,
+        start_epoch: Epoch,
+        target: Option<LedgerInfoWithSignatures>,
+    ) -> Result<DataStreamListener, Error>;
+
+    /// Continuously streams transactions with proofs as the blockchain grows.
+    /// The stream starts at `start_version` and `start_epoch` (inclusive).
+    /// Transaction proof versions are tied to ledger infos within the same
+    /// epoch, otherwise epoch ending ledger infos will signify epoch changes.
+    /// If `include_events` is true, events are also included in the proofs.
+    ///
+    /// Note: if a `target` is provided, the stream will terminate once it reaches
+    /// the target. Otherwise, it will continue indefinitely.
+    async fn continuously_stream_transactions(
+        &self,
+        start_version: Version,
+        start_epoch: Epoch,
+        include_events: bool,
+        target: Option<LedgerInfoWithSignatures>,
     ) -> Result<DataStreamListener, Error>;
 
     /// Terminates the stream that sent the notification with the given
@@ -84,28 +112,6 @@ pub trait DataStreamingClient {
         notification_id: NotificationId,
         notification_feedback: NotificationFeedback,
     ) -> Result<(), Error>;
-
-    /// Continuously streams transactions with proofs as the blockchain grows.
-    /// The stream starts at `start_version` and `start_epoch` (inclusive).
-    /// Transaction proof versions are tied to ledger infos within the same
-    /// epoch, otherwise epoch ending ledger infos will signify epoch changes.
-    /// If `include_events` is true, events are also included in the proofs.
-    async fn continuously_stream_transactions(
-        &self,
-        start_version: Version,
-        start_epoch: Epoch,
-        include_events: bool,
-    ) -> Result<DataStreamListener, Error>;
-
-    /// Continuously streams transaction outputs with proofs as the blockchain
-    /// grows. The stream starts at `start_version` and `start_epoch` (inclusive).
-    /// Transaction output proof versions are tied to ledger infos within the
-    /// same epoch, otherwise epoch ending ledger infos will signify epoch changes.
-    async fn continuously_stream_transaction_outputs(
-        &self,
-        start_version: Version,
-        start_epoch: Epoch,
-    ) -> Result<DataStreamListener, Error>;
 }
 
 /// Messages used by the data streaming client for communication with the
@@ -164,7 +170,7 @@ pub struct GetAllEpochEndingLedgerInfosRequest {
 pub struct GetAllTransactionsRequest {
     pub start_version: Version,
     pub end_version: Version,
-    pub max_proof_version: Version,
+    pub proof_version: Version,
     pub include_events: bool,
 }
 
@@ -173,22 +179,24 @@ pub struct GetAllTransactionsRequest {
 pub struct GetAllTransactionOutputsRequest {
     pub start_version: Version,
     pub end_version: Version,
-    pub max_proof_version: Version,
+    pub proof_version: Version,
 }
 
-/// A client request for continuously streaming transactions with proofs (with no end).
+/// A client request for continuously streaming transactions with proofs
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContinuouslyStreamTransactionsRequest {
     pub start_version: Version,
     pub start_epoch: Epoch,
     pub include_events: bool,
+    pub target: Option<LedgerInfoWithSignatures>,
 }
 
-/// A client request for continuously streaming transaction outputs with proofs (with no end).
+/// A client request for continuously streaming transaction outputs with proofs
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContinuouslyStreamTransactionOutputsRequest {
     pub start_version: Version,
     pub start_epoch: Epoch,
+    pub target: Option<LedgerInfoWithSignatures>,
 }
 
 /// A client request for terminating a stream and providing payload feedback.
@@ -201,6 +209,7 @@ pub struct TerminateStreamRequest {
 /// The feedback for a given notification.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NotificationFeedback {
+    EmptyPayloadData,
     EndOfStream,
     InvalidPayloadData,
     PayloadProofFailed,
@@ -211,6 +220,7 @@ impl NotificationFeedback {
     /// Returns a summary label for the notification feedback
     pub fn get_label(&self) -> &'static str {
         match self {
+            Self::EmptyPayloadData => "empty_payload_data",
             Self::EndOfStream => "end_of_stream",
             Self::InvalidPayloadData => "invalid_payload_data",
             Self::PayloadProofFailed => "payload_proof_failed",
@@ -280,33 +290,66 @@ impl DataStreamingClient for StreamingServiceClient {
         self.send_request_and_await_response(client_request).await
     }
 
-    async fn get_all_transactions(
-        &self,
-        start_version: u64,
-        end_version: u64,
-        max_proof_version: u64,
-        include_events: bool,
-    ) -> Result<DataStreamListener, Error> {
-        let client_request = StreamRequest::GetAllTransactions(GetAllTransactionsRequest {
-            start_version,
-            end_version,
-            max_proof_version,
-            include_events,
-        });
-        self.send_request_and_await_response(client_request).await
-    }
-
     async fn get_all_transaction_outputs(
         &self,
         start_version: u64,
         end_version: u64,
-        max_proof_version: u64,
+        proof_version: u64,
     ) -> Result<DataStreamListener, Error> {
         let client_request =
             StreamRequest::GetAllTransactionOutputs(GetAllTransactionOutputsRequest {
                 start_version,
                 end_version,
-                max_proof_version,
+                proof_version,
+            });
+        self.send_request_and_await_response(client_request).await
+    }
+
+    async fn get_all_transactions(
+        &self,
+        start_version: u64,
+        end_version: u64,
+        proof_version: u64,
+        include_events: bool,
+    ) -> Result<DataStreamListener, Error> {
+        let client_request = StreamRequest::GetAllTransactions(GetAllTransactionsRequest {
+            start_version,
+            end_version,
+            proof_version,
+            include_events,
+        });
+        self.send_request_and_await_response(client_request).await
+    }
+
+    async fn continuously_stream_transaction_outputs(
+        &self,
+        start_version: u64,
+        start_epoch: u64,
+        target: Option<LedgerInfoWithSignatures>,
+    ) -> Result<DataStreamListener, Error> {
+        let client_request = StreamRequest::ContinuouslyStreamTransactionOutputs(
+            ContinuouslyStreamTransactionOutputsRequest {
+                start_version,
+                start_epoch,
+                target,
+            },
+        );
+        self.send_request_and_await_response(client_request).await
+    }
+
+    async fn continuously_stream_transactions(
+        &self,
+        start_version: u64,
+        start_epoch: u64,
+        include_events: bool,
+        target: Option<LedgerInfoWithSignatures>,
+    ) -> Result<DataStreamListener, Error> {
+        let client_request =
+            StreamRequest::ContinuouslyStreamTransactions(ContinuouslyStreamTransactionsRequest {
+                start_version,
+                start_epoch,
+                include_events,
+                target,
             });
         self.send_request_and_await_response(client_request).await
     }
@@ -323,35 +366,6 @@ impl DataStreamingClient for StreamingServiceClient {
         // We can ignore the receiver as no data will be sent.
         let _ = self.send_stream_request(client_request).await?;
         Ok(())
-    }
-
-    async fn continuously_stream_transactions(
-        &self,
-        start_version: u64,
-        start_epoch: u64,
-        include_events: bool,
-    ) -> Result<DataStreamListener, Error> {
-        let client_request =
-            StreamRequest::ContinuouslyStreamTransactions(ContinuouslyStreamTransactionsRequest {
-                start_version,
-                start_epoch,
-                include_events,
-            });
-        self.send_request_and_await_response(client_request).await
-    }
-
-    async fn continuously_stream_transaction_outputs(
-        &self,
-        start_version: u64,
-        start_epoch: u64,
-    ) -> Result<DataStreamListener, Error> {
-        let client_request = StreamRequest::ContinuouslyStreamTransactionOutputs(
-            ContinuouslyStreamTransactionOutputsRequest {
-                start_version,
-                start_epoch,
-            },
-        );
-        self.send_request_and_await_response(client_request).await
     }
 }
 

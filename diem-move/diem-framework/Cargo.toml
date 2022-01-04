@@ -10,16 +10,16 @@ license = "Apache-2.0"
 publish = false
 
 [dependencies]
-bytecode-verifier = { path = "../../language/bytecode-verifier" }
-abigen = { path = "../../language/move-prover/abigen" }
-docgen = { path = "../../language/move-prover/docgen" }
+move-bytecode-verifier = { path = "../../language/move-bytecode-verifier" }
+move-abigen = { path = "../../language/move-prover/move-abigen" }
+move-docgen = { path = "../../language/move-prover/move-docgen" }
 move-command-line-common = { path = "../../language/move-command-line-common" }
-errmapgen = { path = "../../language/move-prover/errmapgen" }
-move-lang = { path = "../../language/move-lang" }
+move-errmapgen = { path = "../../language/move-prover/move-errmapgen" }
+move-compiler = { path = "../../language/move-compiler" }
 move-prover = { path = "../../language/move-prover" }
 diem-crypto = { path = "../../crates/diem-crypto" }
 diem-types = { path = "../../types" }
-diem-workspace-hack = { path = "../../common/workspace-hack" }
+diem-workspace-hack = { path = "../../crates/diem-workspace-hack" }
 move-binary-format = { path = "../../language/move-binary-format" }
 transaction-builder-generator = { path = "../transaction-builder-generator" }
 move-stdlib = { path = "../../language/move-stdlib" }
@@ -46,9 +46,15 @@ tempfile = "3.2.0"
 datatest-stable = "0.1.1"
 diem-vm = { path = "../../diem-move/diem-vm" }
 move-cli = { path = "../../language/tools/move-cli" }
+move-unit-test = { path = "../../language/tools/move-unit-test" }
+diem-transactional-test-harness = { path = "../diem-transactional-test-harness" }
 
 dir-diff = "0.3.2"
 
 [features]
 default = []
 fuzzing = ["diem-types/fuzzing"]
+
+[[test]]
+name = "transactional_tests"
+harness = false

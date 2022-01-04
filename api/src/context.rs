@@ -13,8 +13,7 @@ use diem_types::{
     contract_event::ContractEvent,
     event::EventKey,
     ledger_info::LedgerInfoWithSignatures,
-    protocol_spec::DpnProto,
-    transaction::{SignedTransaction, TransactionInfo},
+    transaction::{SignedTransaction, TransactionWithProof},
 };
 use storage_interface::{MoveDbReader, Order};
 
@@ -31,7 +30,7 @@ use warp::{filters::BoxedFilter, Filter, Reply};
 #[derive(Clone)]
 pub struct Context {
     chain_id: ChainId,
-    db: Arc<dyn MoveDbReader<DpnProto>>,
+    db: Arc<dyn MoveDbReader>,
     mp_sender: MempoolClientSender,
     role: RoleType,
     jsonrpc_config: JsonRpcConfig,
@@ -41,7 +40,7 @@ pub struct Context {
 impl Context {
     pub fn new(
         chain_id: ChainId,
-        db: Arc<dyn MoveDbReader<DpnProto>>,
+        db: Arc<dyn MoveDbReader>,
         mp_sender: MempoolClientSender,
         role: RoleType,
         jsonrpc_config: JsonRpcConfig,
@@ -57,7 +56,7 @@ impl Context {
         }
     }
 
-    pub fn move_converter(&self) -> MoveConverter<dyn MoveDbReader<DpnProto> + '_> {
+    pub fn move_converter(&self) -> MoveConverter<dyn MoveDbReader + '_> {
         MoveConverter::new(self.db.borrow())
     }
 
@@ -117,12 +116,16 @@ impl Context {
         Ok(account_state_blob)
     }
 
+    pub fn get_block_timestamp(&self, version: u64) -> Result<u64> {
+        self.db.get_block_timestamp(version)
+    }
+
     pub fn get_transactions(
         &self,
         start_version: u64,
         limit: u16,
         ledger_version: u64,
-    ) -> Result<Vec<TransactionOnChainData<TransactionInfo>>> {
+    ) -> Result<Vec<TransactionOnChainData>> {
         let data = self
             .db
             .get_transactions(start_version, limit as u64, ledger_version, true)?;
@@ -140,6 +143,7 @@ impl Context {
         let txns = data.transactions;
         let infos = data.proof.transaction_infos;
         let events = data.events.unwrap_or_default();
+
         ensure!(
             txns.len() == infos.len() && txns.len() == events.len(),
             "invalid data size from database: {}, {}, {}",
@@ -148,13 +152,16 @@ impl Context {
             events.len()
         );
 
-        Ok(txns
-            .into_iter()
+        txns.into_iter()
             .zip(infos.into_iter())
             .zip(events.into_iter())
             .enumerate()
-            .map(|(i, ((txn, info), events))| (start_version + i as u64, txn, info, events).into())
-            .collect())
+            .map(|(i, ((txn, info), events))| {
+                let version = start_version + i as u64;
+                self.get_accumulator_root_hash(version)
+                    .map(|h| (version, txn, info, events, h).into())
+            })
+            .collect()
     }
 
     pub fn get_account_transactions(
@@ -163,7 +170,7 @@ impl Context {
         start_seq_number: u64,
         limit: u16,
         ledger_version: u64,
-    ) -> Result<Vec<TransactionOnChainData<TransactionInfo>>> {
+    ) -> Result<Vec<TransactionOnChainData>> {
         let txns = self.db.get_account_transactions(
             address,
             start_seq_number,
@@ -171,18 +178,21 @@ impl Context {
             true,
             ledger_version,
         )?;
-        Ok(txns.into_inner().into_iter().map(|t| t.into()).collect())
+        txns.into_inner()
+            .into_iter()
+            .map(|t| self.convert_into_transaction_on_chain_data(t))
+            .collect::<Result<Vec<_>>>()
     }
 
     pub fn get_transaction_by_hash(
         &self,
         hash: HashValue,
         ledger_version: u64,
-    ) -> Result<Option<TransactionOnChainData<TransactionInfo>>> {
-        Ok(self
-            .db
+    ) -> Result<Option<TransactionOnChainData>> {
+        self.db
             .get_transaction_by_hash(hash, ledger_version, true)?
-            .map(|t| t.into()))
+            .map(|t| self.convert_into_transaction_on_chain_data(t))
+            .transpose()
     }
 
     pub async fn get_pending_transaction_by_hash(
@@ -204,11 +214,24 @@ impl Context {
         &self,
         version: u64,
         ledger_version: u64,
-    ) -> Result<TransactionOnChainData<TransactionInfo>> {
-        Ok(self
-            .db
-            .get_transaction_by_version(version, ledger_version, true)?
-            .into())
+    ) -> Result<TransactionOnChainData> {
+        self.convert_into_transaction_on_chain_data(self.db.get_transaction_by_version(
+            version,
+            ledger_version,
+            true,
+        )?)
+    }
+
+    pub fn get_accumulator_root_hash(&self, version: u64) -> Result<HashValue> {
+        self.db.get_accumulator_root_hash(version)
+    }
+
+    fn convert_into_transaction_on_chain_data(
+        &self,
+        txn: TransactionWithProof,
+    ) -> Result<TransactionOnChainData> {
+        self.get_accumulator_root_hash(txn.version)
+            .map(|h| (txn, h).into())
     }
 
     pub fn get_events(

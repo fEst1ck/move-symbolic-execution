@@ -1,8 +1,12 @@
 // Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+use diem_secure_push_metrics::MetricsPusher;
 use std::path::PathBuf;
 use structopt::StructOpt;
+
+#[global_allocator]
+static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
 
 #[derive(Debug, StructOpt)]
 struct Opt {
@@ -51,6 +55,7 @@ enum Command {
 }
 
 fn main() {
+    let _mp = MetricsPusher::start();
     let opt = Opt::from_args();
 
     rayon::ThreadPoolBuilder::new()

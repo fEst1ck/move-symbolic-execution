@@ -19,11 +19,11 @@ parking_lot = "0.11.1"
 sha3 = "0.9.1"
 tracing = "0.1.26"
 
-bytecode-verifier = { path = "../../bytecode-verifier" }
-diem-workspace-hack = { path = "../../../common/workspace-hack" }
+move-bytecode-verifier = { path = "../../move-bytecode-verifier" }
 move-core-types = { path = "../../move-core/types" }
 move-vm-types = { path = "../types" }
 move-binary-format = { path = "../../move-binary-format" }
+diem-workspace-hack = { version = "0.1", path = "../../../crates/diem-workspace-hack" }
 
 [dev-dependencies]
 anyhow = "1.0.38"
@@ -32,7 +32,7 @@ proptest = "1.0.0"
 
 
 move-ir-compiler = { path = "../../move-ir-compiler" }
-move-lang = { path = "../../move-lang" }
+move-compiler = { path = "../../move-compiler" }
 
 [features]
 default = []

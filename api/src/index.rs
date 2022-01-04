@@ -4,7 +4,9 @@
 use crate::{
     accounts,
     context::Context,
-    events, log,
+    events,
+    failpoint::fail_point,
+    log,
     metrics::{metrics, status_metrics},
     transactions,
 };
@@ -15,7 +17,7 @@ use warp::{
     body::BodyDeserializeError,
     cors::CorsForbidden,
     filters::BoxedFilter,
-    http::StatusCode,
+    http::{header, StatusCode},
     reject::{LengthRequired, MethodNotAllowed, PayloadTooLarge, UnsupportedMediaType},
     reply, Filter, Rejection, Reply,
 };
@@ -26,6 +28,7 @@ const OPEN_API_SPEC: &str = include_str!("../doc/openapi.yaml");
 pub fn routes(context: Context) -> impl Filter<Extract = impl Reply, Error = Infallible> + Clone {
     index(context.clone())
         .or(openapi_spec())
+        .or(accounts::get_account(context.clone()))
         .or(accounts::get_account_resources(context.clone()))
         .or(accounts::get_account_resources_by_ledger_version(
             context.clone(),
@@ -49,7 +52,8 @@ pub fn routes(context: Context) -> impl Filter<Extract = impl Reply, Error = Inf
         .with(
             warp::cors()
                 .allow_any_origin()
-                .allow_methods(vec!["POST", "GET"]),
+                .allow_methods(vec!["POST", "GET"])
+                .allow_headers(vec![header::CONTENT_TYPE]),
         )
         .recover(handle_rejection)
         .with(log::logger())
@@ -83,6 +87,7 @@ pub fn index(context: Context) -> BoxedFilter<(impl Reply,)> {
 }
 
 pub async fn handle_index(context: Context) -> Result<impl Reply, Rejection> {
+    fail_point("endpoint_index")?;
     let info = context.get_latest_ledger_info()?;
     Ok(Response::new(info.clone(), &info)?)
 }

@@ -4,11 +4,11 @@
 use crate::{context::Context, index, tests::pretty};
 use bytes::Bytes;
 use diem_api_types::{
-    mime_types, TransactionOnChainData, X_DIEM_CHAIN_ID, X_DIEM_LEDGER_TIMESTAMP,
+    mime_types, HexEncodedBytes, TransactionOnChainData, X_DIEM_CHAIN_ID, X_DIEM_LEDGER_TIMESTAMP,
     X_DIEM_LEDGER_VERSION,
 };
 use diem_config::config::{ApiConfig, JsonRpcConfig, RoleType};
-use diem_crypto::hash::HashValue;
+use diem_crypto::{hash::HashValue, SigningKey};
 use diem_genesis_tool::validator_builder::{RootKeys, ValidatorBuilder};
 use diem_global_constants::OWNER_ACCOUNT;
 use diem_mempool::mocks::MockSharedMempool;
@@ -30,19 +30,19 @@ use diem_types::{
     chain_id::ChainId,
     ledger_info::{LedgerInfo, LedgerInfoWithSignatures},
     on_chain_config::VMPublishingOption,
-    protocol_spec::DpnProto,
-    transaction::{Transaction, TransactionInfo, TransactionStatus},
+    transaction::{Transaction, TransactionStatus},
 };
 use diem_vm::DiemVM;
 use diemdb::DiemDB;
-use executor::{db_bootstrapper, Executor};
-use executor_types::BlockExecutor;
+use executor::db_bootstrapper;
+use executor_types::BlockExecutorTrait;
 use hyper::Response;
 use mempool_notifications::MempoolNotificationSender;
 use storage_interface::DbReaderWriter;
 
+use executor::block_executor::BlockExecutor;
 use rand::{Rng, SeedableRng};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::{boxed::Box, collections::BTreeMap, sync::Arc, time::SystemTime};
 use vm_validator::vm_validator::VMValidator;
 use warp::http::header::CONTENT_TYPE;
@@ -80,7 +80,7 @@ pub fn new_test_context() -> TestContext {
         rng,
         root_keys,
         validator_owner,
-        Box::new(Executor::<DpnProto, DiemVM>::new(db_rw)),
+        Box::new(BlockExecutor::<DiemVM>::new(db_rw)),
         mempool,
         db,
     )
@@ -94,7 +94,7 @@ pub struct TestContext {
     pub db: Arc<DiemDB>,
     rng: rand::rngs::StdRng,
     root_keys: Arc<RootKeys>,
-    executor: Arc<dyn BlockExecutor>,
+    executor: Arc<dyn BlockExecutorTrait>,
     expect_status_code: u16,
 }
 
@@ -104,7 +104,7 @@ impl TestContext {
         rng: rand::rngs::StdRng,
         root_keys: RootKeys,
         validator_owner: AccountAddress,
-        executor: Box<dyn BlockExecutor>,
+        executor: Box<dyn BlockExecutorTrait>,
         mempool: MockSharedMempool,
         db: Arc<DiemDB>,
     ) -> Self {
@@ -190,11 +190,7 @@ impl TestContext {
         self.context.get_latest_ledger_info().unwrap()
     }
 
-    pub fn get_transactions(
-        &self,
-        start: u64,
-        limit: u16,
-    ) -> Vec<TransactionOnChainData<TransactionInfo>> {
+    pub fn get_transactions(&self, start: u64, limit: u16) -> Vec<TransactionOnChainData> {
         self.context
             .get_transactions(start, limit, self.get_latest_ledger_info().version())
             .unwrap()
@@ -226,7 +222,7 @@ impl TestContext {
             )
             .collect();
 
-        let parent_id = self.executor.committed_block_id().unwrap();
+        let parent_id = self.executor.committed_block_id();
         let result = self
             .executor
             .execute_block((metadata.id(), txns.clone()), parent_id)
@@ -252,6 +248,86 @@ impl TestContext {
             .notify_new_commit(txns, timestamp, 1000)
             .await
             .unwrap();
+    }
+
+    pub async fn api_get_account_resource(
+        &self,
+        account: &LocalAccount,
+        type_name: String,
+    ) -> serde_json::Value {
+        let resources = self
+            .get(&format!(
+                "/accounts/{}/resources",
+                account.address().to_hex_literal()
+            ))
+            .await;
+        let vals: Vec<serde_json::Value> = serde_json::from_value(resources).unwrap();
+        vals.into_iter().find(|v| v["type"] == type_name).unwrap()
+    }
+
+    pub async fn api_execute_script_function(
+        &self,
+        account: &mut LocalAccount,
+        func_id: &str,
+        type_args: serde_json::Value,
+        args: serde_json::Value,
+    ) {
+        self.api_execute_txn(
+            account,
+            json!({
+                "type": "script_function_payload",
+                "function": format!("{}::{}", account.address().to_hex_literal(), func_id),
+                "type_arguments": type_args,
+                "arguments": args
+            }),
+        )
+        .await;
+    }
+
+    pub async fn api_publish_module(&self, account: &mut LocalAccount, code: HexEncodedBytes) {
+        self.api_execute_txn(
+            account,
+            json!({
+                "type": "module_bundle_payload",
+                "modules" : [
+                    {"bytecode": code},
+                ],
+            }),
+        )
+        .await;
+    }
+
+    pub async fn api_execute_txn(&self, account: &mut LocalAccount, payload: Value) {
+        let mut request = json!({
+            "sender": account.address(),
+            "sequence_number": account.sequence_number().to_string(),
+            "gas_unit_price": "0",
+            "max_gas_amount": "1000000",
+            "gas_currency_code": "XUS",
+            "expiration_timestamp_secs": "16373698888888",
+            "payload": payload,
+        });
+        let resp = self
+            .post("/transactions/signing_message", request.clone())
+            .await;
+
+        let signing_msg: HexEncodedBytes = resp["message"].as_str().unwrap().parse().unwrap();
+
+        let sig = account
+            .private_key()
+            .sign_arbitrary_message(signing_msg.inner());
+
+        request["signature"] = json!({
+            "type": "ed25519_signature",
+            "public_key": HexEncodedBytes::from(account.public_key().to_bytes().to_vec()),
+            "signature": HexEncodedBytes::from(sig.to_bytes().to_vec()),
+        });
+
+        self.expect_status_code(202)
+            .post("/transactions", request)
+            .await;
+        self.commit_mempool_txns(1).await;
+        *account.sequence_number_mut() += 1;
     }
 
     pub async fn get(&self, path: &str) -> Value {

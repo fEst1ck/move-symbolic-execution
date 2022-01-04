@@ -3,20 +3,37 @@
 
 use crate::{
     context::Context,
+    failpoint::fail_point,
     metrics::metrics,
     param::{AddressParam, LedgerVersionParam, MoveIdentifierParam, MoveStructTagParam},
 };
 
-use diem_api_types::{Address, Error, LedgerInfo, MoveModuleBytecode, Response, TransactionId};
+use diem_api_types::{
+    AccountData, Address, Error, LedgerInfo, MoveModuleBytecode, Response, TransactionId,
+};
 use diem_types::{
+    account_config::AccountResource,
     account_state::AccountState,
     event::{EventHandle, EventKey},
 };
 
 use anyhow::Result;
-use move_core_types::{identifier::Identifier, language_storage::StructTag, value::MoveValue};
+use move_core_types::{
+    identifier::Identifier, language_storage::StructTag, move_resource::MoveStructType,
+    value::MoveValue,
+};
 use std::convert::TryInto;
 use warp::{filters::BoxedFilter, Filter, Rejection, Reply};
+
+// GET /accounts/<address>
+pub fn get_account(context: Context) -> BoxedFilter<(impl Reply,)> {
+    warp::path!("accounts" / AddressParam)
+        .and(warp::get())
+        .and(context.filter())
+        .and_then(handle_get_account)
+        .with(metrics("get_account"))
+        .boxed()
+}
 
 // GET /accounts/<address>/resources
 pub fn get_account_resources(context: Context) -> BoxedFilter<(impl Reply,)> {
@@ -66,11 +83,20 @@ pub fn get_account_modules_by_ledger_version(context: Context) -> BoxedFilter<(i
         .boxed()
 }
 
+async fn handle_get_account(
+    address: AddressParam,
+    context: Context,
+) -> Result<impl Reply, Rejection> {
+    fail_point("endpoint_get_account")?;
+    Ok(Account::new(None, address, context)?.account()?)
+}
+
 async fn handle_get_account_resources(
     ledger_version: Option<LedgerVersionParam>,
     address: AddressParam,
     context: Context,
 ) -> Result<impl Reply, Rejection> {
+    fail_point("endpoint_get_account_resources")?;
     Ok(Account::new(ledger_version, address, context)?.resources()?)
 }
 
@@ -79,6 +105,7 @@ async fn handle_get_account_modules(
     address: AddressParam,
     context: Context,
 ) -> Result<impl Reply, Rejection> {
+    fail_point("endpoint_get_account_modules")?;
     Ok(Account::new(ledger_version, address, context)?.modules()?)
 }
 
@@ -114,6 +141,15 @@ impl Account {
             latest_ledger_info,
             context,
         })
+    }
+
+    pub fn account(self) -> Result<impl Reply, Error> {
+        let account: AccountData = self
+            .account_state()?
+            .get_account_resource()?
+            .ok_or_else(|| self.resource_not_found(&AccountResource::struct_tag()))?
+            .into();
+        Response::new(self.latest_ledger_info, &account)
     }
 
     pub fn resources(self) -> Result<impl Reply, Error> {

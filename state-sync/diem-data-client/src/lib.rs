@@ -7,11 +7,9 @@ use async_trait::async_trait;
 use diem_types::{
     account_state_blob::AccountStatesChunkWithProof,
     ledger_info::LedgerInfoWithSignatures,
-    transaction::{
-        default_protocol::{TransactionListWithProof, TransactionOutputListWithProof},
-        Version,
-    },
+    transaction::{TransactionListWithProof, TransactionOutputListWithProof, Version},
 };
+use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use storage_service::UnexpectedResponseError;
@@ -253,6 +251,11 @@ impl GlobalDataSummary {
             optimal_chunk_sizes: OptimalChunkSizes::empty(),
         }
     }
+
+    /// Returns true iff the global data summary is empty
+    pub fn is_empty(&self) -> bool {
+        self == &Self::empty()
+    }
 }
 
 /// Holds the optimal chunk sizes that clients should use when
@@ -277,7 +280,7 @@ impl OptimalChunkSizes {
 }
 
 /// A summary of all data that is currently advertised in the network.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct AdvertisedData {
     /// The ranges of account states advertised, e.g., if a range is
     /// (X,Y), it means all account states are held for every version X->Y
@@ -302,6 +305,20 @@ pub struct AdvertisedData {
     /// is (X,Y), it means all transaction outputs for versions X->Y
     /// (inclusive) are available.
     pub transaction_outputs: Vec<CompleteDataRange<Version>>,
+}
+
+impl fmt::Debug for AdvertisedData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let sync_lis = (&self.synced_ledger_infos)
+            .iter()
+            .map(|LedgerInfoWithSignatures::V0(ledger)| format!("{}", ledger))
+            .join(", ");
+        write!(
+            f,
+            "account_states: {:?}, epoch_ending_ledger_infos: {:?}, synced_ledger_infos: [{}], transactions: {:?}, transaction_outputs: {:?}",
+            &self.account_states, &self.epoch_ending_ledger_infos, sync_lis, &self.transactions, &self.transaction_outputs
+        )
+    }
 }
 
 impl AdvertisedData {
@@ -337,5 +354,30 @@ impl AdvertisedData {
             }
         }
         true
+    }
+
+    /// Returns the highest epoch ending ledger info advertised in the network
+    pub fn highest_epoch_ending_ledger_info(&self) -> Option<Epoch> {
+        self.epoch_ending_ledger_infos
+            .iter()
+            .map(|epoch_range| epoch_range.highest())
+            .max()
+    }
+
+    /// Returns the highest synced ledger info advertised in the network
+    pub fn highest_synced_ledger_info(&self) -> Option<LedgerInfoWithSignatures> {
+        let highest_synced_position = self
+            .synced_ledger_infos
+            .iter()
+            .map(|ledger_info_with_sigs| ledger_info_with_sigs.ledger_info().version())
+            .position_max();
+
+        if let Some(highest_synced_position) = highest_synced_position {
+            self.synced_ledger_infos
+                .get(highest_synced_position)
+                .cloned()
+        } else {
+            None
+        }
     }
 }

@@ -23,17 +23,17 @@ thiserror = "1.0.24"
 tokio = { version = "1.8.1", features = ["full"] }
 tokio-stream = "0.1.4"
 
-bounded-executor = { path = "../common/bounded-executor" }
-channel = { path = "../common/channel" }
+bounded-executor = { path = "../crates/bounded-executor" }
+channel = { path = "../crates/channel" }
 bcs = "0.1.2"
 diem-config = { path = "../config" }
 diem-crypto = { path = "../crates/diem-crypto" }
-diem-logger = { path = "../common/logger" }
-diem-metrics = { path = "../common/metrics" }
-diem-infallible = { path = "../common/infallible" }
-diem-proptest-helpers = { path = "../common/proptest-helpers", optional = true }
+diem-logger = { path = "../crates/diem-logger" }
+diem-metrics = { path = "../crates/diem-metrics" }
+diem-infallible = { path = "../crates/diem-infallible" }
+diem-proptest-helpers = { path = "../crates/diem-proptest-helpers", optional = true }
 diem-types = { path = "../types" }
-diem-workspace-hack = { path = "../common/workspace-hack" }
+diem-workspace-hack = { version = "0.1", path = "../crates/diem-workspace-hack" }
 event-notifications = { path = "../state-sync/inter-component/event-notifications" }
 mirai-annotations = "1.10.1"
 mempool-notifications = { path = "../state-sync/inter-component/mempool-notifications" }
@@ -41,7 +41,7 @@ network = { path = "../network" }
 rand = "0.8.3"
 netcore = { path = "../network/netcore" }
 serde_json = "1.0.64"
-short-hex-str = { path = "../common/short-hex-str" }
+short-hex-str = { path = "../crates/short-hex-str" }
 storage-interface = { path = "../storage/storage-interface" }
 vm-validator = { path = "../vm-validator" }
 
@@ -52,7 +52,7 @@ enum_dispatch = "0.3.5"
 proptest = "1.0.0"
 
 diem-config = { path = "../config", features = ["fuzzing"] }
-diem-id-generator = { path = "../common/id-generator" }
+diem-id-generator = { path = "../crates/diem-id-generator" }
 network = { path = "../network", features = ["fuzzing"] }
 storage-interface = { path = "../storage/storage-interface", features = ["fuzzing"] }
 

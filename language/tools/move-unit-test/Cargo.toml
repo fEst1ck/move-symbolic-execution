@@ -19,17 +19,17 @@ regex = "1.1.9"
 
 move-command-line-common = { path = "../../move-command-line-common" }
 move-stdlib = { path = "../../move-stdlib", features = ["testing"] }
-diem-workspace-hack = { path = "../../../common/workspace-hack" }
 move-core-types = { path = "../../move-core/types" }
-move-lang = { path = "../../move-lang" }
+move-compiler = { path = "../../move-compiler" }
 move-vm-types = { path = "../../move-vm/types" }
 move-vm-runtime = { path = "../../move-vm/runtime" }
 move-vm-test-utils = { path = "../../move-vm/test-utils" }
-resource-viewer = { path = "../resource-viewer" }
+move-resource-viewer = { path = "../move-resource-viewer" }
 move-binary-format = { path = "../../move-binary-format" }
 move-model = { path = "../../move-model" }
-bytecode-interpreter = { path = "../../move-prover/interpreter" }
+move-stackless-bytecode-interpreter = { path = "../../move-prover/interpreter" }
 move-bytecode-utils = { path = "../move-bytecode-utils" }
+diem-workspace-hack = { version = "0.1", path = "../../../crates/diem-workspace-hack" }
 
 [dev-dependencies]
 datatest-stable = "0.1.1"

@@ -7,17 +7,15 @@ use crate::config::{
     BannedDepsConfig, DirectDepDupsConfig, EnforcedAttributesConfig, MoveToDiemDepsConfig,
     OverlayConfig,
 };
-use anyhow::anyhow;
 use guppy::{
     graph::{feature::FeatureFilterFn, PackagePublish},
     Version, VersionReq,
 };
-use hakari::summaries::HakariBuilderSummary;
 use std::{
     collections::{BTreeMap, HashMap},
     iter,
 };
-use x_core::WorkspaceStatus;
+use x_core::{WorkspaceStatus, XCoreContext};
 use x_lint::prelude::*;
 
 /// Ban certain crates from being used as direct dependencies or in the default build.
@@ -225,22 +223,11 @@ impl PackageLinter for IrrelevantBuildDeps {
 #[derive(Debug)]
 pub struct DirectDepDups<'cfg> {
     config: &'cfg DirectDepDupsConfig,
-    hakari_package: &'cfg str,
 }
 
 impl<'cfg> DirectDepDups<'cfg> {
-    pub fn new(
-        config: &'cfg DirectDepDupsConfig,
-        hakari_config: &'cfg HakariBuilderSummary,
-    ) -> crate::Result<Self> {
-        let hakari_package = hakari_config
-            .hakari_package
-            .as_deref()
-            .ok_or_else(|| anyhow!("hakari.hakari-package not defined in x.toml"))?;
-        Ok(Self {
-            config,
-            hakari_package,
-        })
+    pub fn new(config: &'cfg DirectDepDupsConfig) -> crate::Result<Self> {
+        Ok(Self { config })
     }
 }
 
@@ -263,7 +250,7 @@ impl<'cfg> ProjectLinter for DirectDepDups<'cfg> {
         package_graph.query_workspace().resolve_with_fn(|_, link| {
             // Collect direct dependencies of workspace packages.
             let (from, to) = link.endpoints();
-            if from.name() == self.hakari_package {
+            if from.name() == ctx.workspace_hack_name() {
                 // Skip the workspace hack package.
                 return false;
             }
@@ -398,25 +385,34 @@ fn feature_str(feature: Option<&str>) -> &str {
 
 /// Ensure that all unpublished packages only use path dependencies for workspace dependencies
 #[derive(Debug)]
-pub struct UnpublishedPackagesOnlyUsePathDependencies {
+pub struct UnpublishedPackagesOnlyUsePathDependencies<'cfg> {
+    hakari_package: &'cfg str,
     no_version_req: VersionReq,
 }
 
-impl UnpublishedPackagesOnlyUsePathDependencies {
-    pub fn new() -> Self {
+impl<'cfg> UnpublishedPackagesOnlyUsePathDependencies<'cfg> {
+    pub fn new(core: &'cfg XCoreContext) -> Self {
+        let hakari_package = core
+            .hakari_builder()
+            .expect("hakari builder")
+            .hakari_package()
+            .expect("hakari-package specified")
+            .name();
+
         Self {
+            hakari_package,
             no_version_req: VersionReq::parse("*").expect("* should be a valid req"),
         }
     }
 }
 
-impl Linter for UnpublishedPackagesOnlyUsePathDependencies {
+impl<'cfg> Linter for UnpublishedPackagesOnlyUsePathDependencies<'cfg> {
     fn name(&self) -> &'static str {
         "unpublished-packages-only-use-path-dependencies"
     }
 }
 
-impl PackageLinter for UnpublishedPackagesOnlyUsePathDependencies {
+impl<'cfg> PackageLinter for UnpublishedPackagesOnlyUsePathDependencies<'cfg> {
     fn run<'l>(
         &self,
         ctx: &PackageContext<'l>,
@@ -429,7 +425,12 @@ impl PackageLinter for UnpublishedPackagesOnlyUsePathDependencies {
             return Ok(RunStatus::Executed);
         }
 
-        for direct_dep in metadata.direct_links().filter(|p| p.to().in_workspace()) {
+        for direct_dep in metadata.direct_links().filter(|p| {
+            let to = p.to();
+            // Ignore the workspace-hack package for this check since its version always
+            // stays the same.
+            to.in_workspace() && to.name() != self.hakari_package
+        }) {
             if direct_dep.version_req() != &self.no_version_req {
                 let msg = format!(
                     "unpublished package specifies a version of first-party dependency '{}' ({}); \
@@ -447,15 +448,30 @@ impl PackageLinter for UnpublishedPackagesOnlyUsePathDependencies {
 
 /// Ensure that all published packages only depend on other, published packages
 #[derive(Debug)]
-pub struct PublishedPackagesDontDependOnUnpublishedPackages;
+pub struct PublishedPackagesDontDependOnUnpublishedPackages<'cfg> {
+    hakari_package: &'cfg str,
+}
 
-impl Linter for PublishedPackagesDontDependOnUnpublishedPackages {
+impl<'cfg> PublishedPackagesDontDependOnUnpublishedPackages<'cfg> {
+    pub fn new(core: &'cfg XCoreContext) -> Self {
+        let hakari_package = core
+            .hakari_builder()
+            .expect("hakari builder")
+            .hakari_package()
+            .expect("hakari-package specified")
+            .name();
+
+        Self { hakari_package }
+    }
+}
+
+impl<'cfg> Linter for PublishedPackagesDontDependOnUnpublishedPackages<'cfg> {
     fn name(&self) -> &'static str {
         "published-packages-dont-depend-on-unpublished-packages"
     }
 }
 
-impl PackageLinter for PublishedPackagesDontDependOnUnpublishedPackages {
+impl<'cfg> PackageLinter for PublishedPackagesDontDependOnUnpublishedPackages<'cfg> {
     fn run<'l>(
         &self,
         ctx: &PackageContext<'l>,
@@ -468,10 +484,11 @@ impl PackageLinter for PublishedPackagesDontDependOnUnpublishedPackages {
             return Ok(RunStatus::Executed);
         }
 
-        for direct_dep in metadata
-            .direct_links()
-            .filter(|p| !p.dev_only() && p.to().in_workspace())
-        {
+        for direct_dep in metadata.direct_links().filter(|p| {
+            // Ignore the workspace-hack package because a stub is already on crates.io.
+            let to = p.to();
+            !p.dev_only() && to.in_workspace() && to.name() != self.hakari_package
+        }) {
             // If the direct dependency isn't publishable
             if direct_dep.to().publish().is_never() {
                 out.write(

@@ -19,7 +19,7 @@ use executor_test_helpers::{
         create_db_and_executor, test_execution_with_storage_impl, verify_committed_txn_status,
     },
 };
-use executor_types::BlockExecutor;
+use executor_types::BlockExecutorTrait;
 use move_ir_compiler::Compiler;
 use std::convert::TryFrom;
 
@@ -294,6 +294,7 @@ fn test_change_publishing_option_to_custom() {
     import 0x1.DiemTransactionPublishingOption;
 
     main(account: signer) {
+    label b0:
       DiemTransactionPublishingOption.set_open_script(&account);
 
       return;

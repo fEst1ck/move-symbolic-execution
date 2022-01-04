@@ -21,10 +21,10 @@ bcs = "0.1.2"
 diem-config = { path = ".." }
 diem-crypto = { path = "../../crates/diem-crypto" }
 diem-client = { path = "../../crates/diem-client", features = ["blocking"], default-features = false }
-diem-logger = { path = "../../common/logger" }
-diem-temppath = { path = "../../common/temppath" }
+diem-logger = { path = "../../crates/diem-logger" }
+diem-temppath = { path = "../../crates/diem-temppath" }
 diem-types = { path = "../../types" }
-diem-workspace-hack = { path = "../../common/workspace-hack" }
+diem-workspace-hack = { version = "0.1", path = "../../crates/diem-workspace-hack" }
 
 [dev-dependencies]
 diem-types = {path = "../../types", features = ["fuzzing"]}

@@ -1,4 +1,4 @@
-Move prover returns: exiting with boogie verification errors
+Move prover returns: exiting with verification errors
 error: post-condition does not hold
    ┌─ tests/sources/functional/strong_edges.move:54:9
    │
@@ -27,4 +27,5 @@ error: unknown assertion failed
    =     at tests/sources/functional/strong_edges.move:61: loc__edge_incorrect
    =         r_ref = <redacted>
    =     at tests/sources/functional/strong_edges.move:62: loc__edge_incorrect
+   =         r = <redacted>
    =     at tests/sources/functional/strong_edges.move:64: loc__edge_incorrect

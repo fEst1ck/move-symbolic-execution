@@ -6,6 +6,7 @@ use diem_crypto::{hash::SPARSE_MERKLE_PLACEHOLDER_HASH, HashValue};
 use diem_types::{
     access_path::AccessPath,
     account_address::AccountAddress,
+    account_config::diem_root_address,
     account_state::AccountState,
     account_state_blob::{AccountStateBlob, AccountStateWithProof, AccountStatesChunkWithProof},
     contract_event::{ContractEvent, EventByVersionWithProof, EventWithProof},
@@ -14,25 +15,22 @@ use diem_types::{
     event::EventKey,
     ledger_info::LedgerInfoWithSignatures,
     move_resource::MoveStorage,
+    on_chain_config::{
+        default_access_path_for_config, experimental_access_path_for_config, ConfigID,
+    },
     proof::{
         definition::LeafCount, AccumulatorConsistencyProof, SparseMerkleProof,
         SparseMerkleRangeProof, TransactionAccumulatorSummary,
     },
-    protocol_spec::ProtocolSpec,
     state_proof::StateProof,
     transaction::{
         AccountTransactionsWithProof, TransactionInfo, TransactionListWithProof,
         TransactionOutputListWithProof, TransactionToCommit, TransactionWithProof, Version,
     },
 };
-use itertools::Itertools;
 use move_core_types::resolver::{ModuleResolver, ResourceResolver};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::{HashMap, HashSet},
-    convert::TryFrom,
-    sync::Arc,
-};
+use std::{convert::TryFrom, sync::Arc};
 use thiserror::Error;
 
 #[cfg(any(feature = "testing", feature = "fuzzing"))]
@@ -96,6 +94,10 @@ impl StartupInfo {
                     .as_ref()
                     .expect("EpochState must exist")
             })
+    }
+
+    pub fn into_latest_tree_state(self) -> TreeState {
+        self.synced_tree_state.unwrap_or(self.committed_tree_state)
     }
 }
 
@@ -182,7 +184,7 @@ pub enum Order {
 /// Trait that is implemented by a DB that supports certain public (to client) read APIs
 /// expected of a Diem DB
 #[allow(unused_variables)]
-pub trait DbReader<PS: ProtocolSpec>: Send + Sync {
+pub trait DbReader: Send + Sync {
     /// See [`DiemDB::get_epoch_ending_ledger_infos`].
     ///
     /// [`DiemDB::get_epoch_ending_ledger_infos`]:
@@ -204,7 +206,7 @@ pub trait DbReader<PS: ProtocolSpec>: Send + Sync {
         batch_size: u64,
         ledger_version: Version,
         fetch_events: bool,
-    ) -> Result<TransactionListWithProof<PS::TransactionInfo>> {
+    ) -> Result<TransactionListWithProof> {
         unimplemented!()
     }
 
@@ -216,7 +218,7 @@ pub trait DbReader<PS: ProtocolSpec>: Send + Sync {
         hash: HashValue,
         ledger_version: Version,
         fetch_events: bool,
-    ) -> Result<Option<TransactionWithProof<PS::TransactionInfo>>> {
+    ) -> Result<Option<TransactionWithProof>> {
         unimplemented!()
     }
 
@@ -228,7 +230,7 @@ pub trait DbReader<PS: ProtocolSpec>: Send + Sync {
         version: Version,
         ledger_version: Version,
         fetch_events: bool,
-    ) -> Result<TransactionWithProof<PS::TransactionInfo>> {
+    ) -> Result<TransactionWithProof> {
         unimplemented!()
     }
 
@@ -254,7 +256,7 @@ pub trait DbReader<PS: ProtocolSpec>: Send + Sync {
         start_version: Version,
         limit: u64,
         ledger_version: Version,
-    ) -> Result<TransactionOutputListWithProof<PS::TransactionInfo>> {
+    ) -> Result<TransactionOutputListWithProof> {
         unimplemented!()
     }
 
@@ -277,7 +279,7 @@ pub trait DbReader<PS: ProtocolSpec>: Send + Sync {
         order: Order,
         limit: u64,
         known_version: Option<u64>,
-    ) -> Result<Vec<EventWithProof<PS::TransactionInfo>>> {
+    ) -> Result<Vec<EventWithProof>> {
         unimplemented!()
     }
 
@@ -296,7 +298,7 @@ pub trait DbReader<PS: ProtocolSpec>: Send + Sync {
         event_key: &EventKey,
         event_version: u64,
         proof_version: u64,
-    ) -> Result<EventByVersionWithProof<PS::TransactionInfo>> {
+    ) -> Result<EventByVersionWithProof> {
         unimplemented!()
     }
 
@@ -356,7 +358,7 @@ pub trait DbReader<PS: ProtocolSpec>: Send + Sync {
         seq_num: u64,
         include_events: bool,
         ledger_version: Version,
-    ) -> Result<Option<TransactionWithProof<PS::TransactionInfo>>> {
+    ) -> Result<Option<TransactionWithProof>> {
         unimplemented!()
     }
 
@@ -371,7 +373,7 @@ pub trait DbReader<PS: ProtocolSpec>: Send + Sync {
         limit: u64,
         include_events: bool,
         ledger_version: Version,
-    ) -> Result<AccountTransactionsWithProof<PS::TransactionInfo>> {
+    ) -> Result<AccountTransactionsWithProof> {
         unimplemented!()
     }
 
@@ -397,7 +399,7 @@ pub trait DbReader<PS: ProtocolSpec>: Send + Sync {
         address: AccountAddress,
         version: Version,
         ledger_version: Version,
-    ) -> Result<AccountStateWithProof<PS::TransactionInfo>> {
+    ) -> Result<AccountStateWithProof> {
         unimplemented!()
     }
 
@@ -511,51 +513,53 @@ pub trait DbReader<PS: ProtocolSpec>: Send + Sync {
     }
 }
 
-impl<PS: ProtocolSpec> MoveStorage for &dyn DbReader<PS> {
-    fn batch_fetch_resources(&self, access_paths: Vec<AccessPath>) -> Result<Vec<Vec<u8>>> {
-        self.batch_fetch_resources_by_version(access_paths, self.fetch_synced_version()?)
+impl MoveStorage for &dyn DbReader {
+    fn fetch_resource(&self, access_path: AccessPath) -> Result<Vec<u8>> {
+        self.fetch_resource_by_version(access_path, self.fetch_synced_version()?)
     }
 
-    fn batch_fetch_resources_by_version(
+    fn fetch_resource_by_version(
         &self,
-        access_paths: Vec<AccessPath>,
+        access_path: AccessPath,
         version: Version,
-    ) -> Result<Vec<Vec<u8>>> {
-        let addresses: Vec<AccountAddress> = access_paths
-            .iter()
-            .collect::<HashSet<_>>()
-            .iter()
-            .map(|path| path.address)
-            .collect();
+    ) -> Result<Vec<u8>> {
+        let (account_state_blob, _) =
+            self.get_account_state_with_proof_by_version(access_path.address, version)?;
+        let account_state =
+            AccountState::try_from(&account_state_blob.ok_or_else(|| {
+                format_err!("missing blob in account state/account does not exist")
+            })?)?;
 
-        let results = addresses
-            .iter()
-            .map(|addr| self.get_account_state_with_proof_by_version(*addr, version))
-            .collect::<Result<Vec<_>>>()?;
+        Ok(account_state
+            .get(&access_path.path)
+            .ok_or_else(|| format_err!("no value found in account state"))?
+            .clone())
+    }
 
-        // Account address --> AccountState
-        let account_states = addresses
-            .iter()
-            .zip_eq(results)
-            .map(|(addr, (blob, _proof))| {
-                let account_state = AccountState::try_from(&blob.ok_or_else(|| {
+    fn fetch_config_by_version(&self, config_id: ConfigID, version: Version) -> Result<Vec<u8>> {
+        let diem_root_state = AccountState::try_from(
+            &self
+                .get_account_state_with_proof_by_version(diem_root_address(), version)?
+                .0
+                .ok_or_else(|| {
                     format_err!("missing blob in account state/account does not exist")
-                })?)?;
-                Ok((addr, account_state))
-            })
-            .collect::<Result<HashMap<_, AccountState>>>()?;
+                })?,
+        )?;
 
-        access_paths
-            .iter()
-            .map(|path| {
-                Ok(account_states
-                    .get(&path.address)
-                    .ok_or_else(|| format_err!("missing account state for queried access path"))?
-                    .get(&path.path)
-                    .ok_or_else(|| format_err!("no value found in account state"))?
-                    .clone())
-            })
-            .collect()
+        match diem_root_state.get(&experimental_access_path_for_config(config_id).path) {
+            Some(config) => Ok(config.to_vec()),
+            _ => diem_root_state
+                .get(&default_access_path_for_config(config_id).path)
+                .map_or_else(
+                    || {
+                        Err(format_err!(
+                            "no config {} found in diem root account state",
+                            config_id
+                        ))
+                    },
+                    |bytes| Ok(bytes.to_vec()),
+                ),
+        }
     }
 
     fn fetch_synced_version(&self) -> Result<u64> {
@@ -575,7 +579,7 @@ impl<PS: ProtocolSpec> MoveStorage for &dyn DbReader<PS> {
 /// Trait that is implemented by a DB that supports certain public (to client) write APIs
 /// expected of a Diem DB. This adds write APIs to DbReader.
 #[allow(unused_variables)]
-pub trait DbWriter<PS: ProtocolSpec>: Send + Sync {
+pub trait DbWriter: Send + Sync {
     /// Persist transactions. Called by the executor module when either syncing nodes or committing
     /// blocks during normal operation.
     /// See [`DiemDB::save_transactions`].
@@ -602,52 +606,37 @@ pub trait DbWriter<PS: ProtocolSpec>: Send + Sync {
     }
 }
 
-pub trait MoveDbReader<PS: ProtocolSpec>:
-    DbReader<PS> + ResourceResolver<Error = anyhow::Error> + ModuleResolver<Error = anyhow::Error>
+pub trait MoveDbReader:
+    DbReader + ResourceResolver<Error = anyhow::Error> + ModuleResolver<Error = anyhow::Error>
 {
 }
 
 #[derive(Clone)]
-pub struct DbReaderWriter<PS: ProtocolSpec> {
-    pub reader: Arc<dyn DbReader<PS>>,
-    pub writer: Arc<dyn DbWriter<PS>>,
+pub struct DbReaderWriter {
+    pub reader: Arc<dyn DbReader>,
+    pub writer: Arc<dyn DbWriter>,
 }
 
-impl<PS: ProtocolSpec> DbReaderWriter<PS> {
-    pub fn new<D: 'static + DbReader<PS> + DbWriter<PS>>(db: D) -> Self {
+impl DbReaderWriter {
+    pub fn new<D: 'static + DbReader + DbWriter>(db: D) -> Self {
         let reader = Arc::new(db);
         let writer = Arc::clone(&reader);
 
         Self { reader, writer }
     }
 
-    pub fn from_arc<D: 'static + DbReader<PS> + DbWriter<PS>>(arc_db: Arc<D>) -> Self {
+    pub fn from_arc<D: 'static + DbReader + DbWriter>(arc_db: Arc<D>) -> Self {
         let reader = Arc::clone(&arc_db);
         let writer = Arc::clone(&arc_db);
 
         Self { reader, writer }
     }
 
-    pub fn wrap<D: 'static + DbReader<PS> + DbWriter<PS>>(db: D) -> (Arc<D>, Self) {
+    pub fn wrap<D: 'static + DbReader + DbWriter>(db: D) -> (Arc<D>, Self) {
         let arc_db = Arc::new(db);
         (Arc::clone(&arc_db), Self::from_arc(arc_db))
     }
 }
-
-/*
-getting this error: conflicting implementation in crate `core`:
-            - impl<T> From<T> for T;
-
-impl<D, PS> From<D> for DbReaderWriter<PS>
-where
-    D: 'static + DbReader<PS> + DbWriter<PS>,
-    PS: ProtocolSpec,
-{
-    fn from(db: D) -> Self {
-        Self::new(db)
-    }
-}
- */
 
 /// Network types for storage service
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -693,13 +682,4 @@ impl SaveTransactionsRequest {
             ledger_info_with_signatures,
         }
     }
-}
-
-pub mod default_protocol {
-    use diem_types::protocol_spec::DpnProto;
-
-    // trait aliases are experimental
-    // pub trait DbReader = super::DbReader<DpnProto>;
-    // pub trait DbWriter = super::DbWriter<DpnProto>;
-    pub type DbReaderWriter = super::DbReaderWriter<DpnProto>;
 }

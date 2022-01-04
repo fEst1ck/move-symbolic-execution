@@ -7,7 +7,7 @@ use crate::{
     account_state::AccountState,
     ledger_info::LedgerInfo,
     proof::{AccountStateProof, SparseMerkleRangeProof},
-    transaction::{TransactionInfoTrait, Version},
+    transaction::Version,
 };
 use anyhow::{anyhow, ensure, Error, Result};
 use diem_crypto::{
@@ -19,12 +19,39 @@ use diem_crypto_derive::CryptoHasher;
 use proptest::{arbitrary::Arbitrary, prelude::*};
 #[cfg(any(test, feature = "fuzzing"))]
 use proptest_derive::Arbitrary;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::{convert::TryFrom, fmt};
 
-#[derive(Clone, Eq, PartialEq, Serialize, Deserialize, CryptoHasher)]
+#[derive(Clone, Eq, PartialEq, Serialize, CryptoHasher)]
 pub struct AccountStateBlob {
     blob: Vec<u8>,
+    #[serde(skip)]
+    hash: HashValue,
+}
+
+impl<'de> Deserialize<'de> for AccountStateBlob {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename = "AccountStateBlob")]
+        struct RawBlob {
+            blob: Vec<u8>,
+        }
+        let blob = RawBlob::deserialize(deserializer)?;
+
+        Ok(Self::new(blob.blob))
+    }
+}
+
+impl AccountStateBlob {
+    fn new(blob: Vec<u8>) -> Self {
+        let mut hasher = AccountStateBlobHasher::default();
+        hasher.update(&blob);
+        let hash = hasher.finish();
+        Self { blob, hash }
+    }
 }
 
 impl fmt::Debug for AccountStateBlob {
@@ -65,7 +92,7 @@ impl From<AccountStateBlob> for Vec<u8> {
 
 impl From<Vec<u8>> for AccountStateBlob {
     fn from(blob: Vec<u8>) -> AccountStateBlob {
-        AccountStateBlob { blob }
+        AccountStateBlob::new(blob)
     }
 }
 
@@ -73,9 +100,7 @@ impl TryFrom<&AccountState> for AccountStateBlob {
     type Error = Error;
 
     fn try_from(account_state: &AccountState) -> Result<Self> {
-        Ok(Self {
-            blob: bcs::to_bytes(account_state)?,
-        })
+        Ok(Self::new(bcs::to_bytes(account_state)?))
     }
 }
 
@@ -114,9 +139,7 @@ impl CryptoHash for AccountStateBlob {
     type Hasher = AccountStateBlobHasher;
 
     fn hash(&self) -> HashValue {
-        let mut hasher = Self::Hasher::default();
-        hasher.update(&self.blob);
-        hasher.finish()
+        self.hash
     }
 }
 
@@ -139,23 +162,19 @@ impl Arbitrary for AccountStateBlob {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(any(test, feature = "fuzzing"), derive(Arbitrary))]
-pub struct AccountStateWithProof<T> {
+pub struct AccountStateWithProof {
     /// The transaction version at which this account state is seen.
     pub version: Version,
     /// Blob value representing the account state. If this field is not set, it
     /// means the account does not exist.
     pub blob: Option<AccountStateBlob>,
     /// The proof the client can use to authenticate the value.
-    pub proof: AccountStateProof<T>,
+    pub proof: AccountStateProof,
 }
 
-impl<T: TransactionInfoTrait> AccountStateWithProof<T> {
+impl AccountStateWithProof {
     /// Constructor.
-    pub fn new(
-        version: Version,
-        blob: Option<AccountStateBlob>,
-        proof: AccountStateProof<T>,
-    ) -> Self {
+    pub fn new(version: Version, blob: Option<AccountStateBlob>, proof: AccountStateProof) -> Self {
         Self {
             version,
             blob,
@@ -188,12 +207,6 @@ impl<T: TransactionInfoTrait> AccountStateWithProof<T> {
     }
 }
 
-pub mod default_protocol {
-    use crate::transaction::TransactionInfo;
-
-    pub type AccountStateWithProof = super::AccountStateWithProof<TransactionInfo>;
-}
-
 /// TODO(joshlind): add a proof implementation (e.g., verify()) and unit tests
 /// for these once we start supporting them.
 ///
@@ -217,7 +230,7 @@ pub struct AccountStatesChunkWithProof {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_protocol::AccountStateWithProof, *};
+    use super::{AccountStateWithProof, *};
     use bcs::test_helpers::assert_canonical_encode_decode;
     use proptest::collection::vec;
 

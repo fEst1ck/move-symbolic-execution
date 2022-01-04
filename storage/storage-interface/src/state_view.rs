@@ -11,11 +11,10 @@ use diem_types::{
     account_state::AccountState,
     account_state_blob::AccountStateBlob,
     proof::SparseMerkleProof,
-    protocol_spec::ProtocolSpec,
     transaction::{Version, PRE_GENESIS_VERSION},
 };
 use parking_lot::RwLock;
-use scratchpad::{AccountStatus, SparseMerkleTree};
+use scratchpad::{AccountStatus, FrozenSparseMerkleTree, SparseMerkleTree};
 use std::{
     collections::{hash_map::Entry, HashMap},
     convert::TryInto,
@@ -24,13 +23,13 @@ use std::{
 
 /// `VerifiedStateView` is like a snapshot of the global state comprised of state view at two
 /// levels, persistent storage and memory.
-pub struct VerifiedStateView<'a, PS: ProtocolSpec> {
+pub struct VerifiedStateView {
     /// For logging and debugging purpose, identifies what this view is for.
     id: StateViewId,
 
     /// A gateway implementing persistent storage interface, which can be a RPC client or direct
     /// accessor.
-    reader: Arc<dyn DbReader<PS>>,
+    reader: Arc<dyn DbReader>,
 
     /// The most recent version in persistent storage.
     latest_persistent_version: Option<Version>,
@@ -39,7 +38,7 @@ pub struct VerifiedStateView<'a, PS: ProtocolSpec> {
     latest_persistent_state_root: HashValue,
 
     /// The in-momery version of sparse Merkle tree of which the states haven't been committed.
-    speculative_state: &'a SparseMerkleTree<AccountStateBlob>,
+    speculative_state: FrozenSparseMerkleTree<AccountStateBlob>,
 
     /// The cache of verified account states from `reader` and `speculative_state_view`,
     /// represented by a hashmap with an account address as key and a pair of an ordered
@@ -81,16 +80,16 @@ pub struct VerifiedStateView<'a, PS: ProtocolSpec> {
     account_to_proof_cache: RwLock<HashMap<HashValue, SparseMerkleProof<AccountStateBlob>>>,
 }
 
-impl<'a, PS: ProtocolSpec> VerifiedStateView<'a, PS> {
+impl VerifiedStateView {
     /// Constructs a [`VerifiedStateView`] with persistent state view represented by
     /// `latest_persistent_state_root` plus a storage reader, and the in-memory speculative state
     /// on top of it represented by `speculative_state`.
     pub fn new(
         id: StateViewId,
-        reader: Arc<dyn DbReader<PS>>,
+        reader: Arc<dyn DbReader>,
         latest_persistent_version: Option<Version>,
         latest_persistent_state_root: HashValue,
-        speculative_state: &'a SparseMerkleTree<AccountStateBlob>,
+        speculative_state: SparseMerkleTree<AccountStateBlob>,
     ) -> Self {
         // Hack: When there's no transaction in the db but state tree root hash is not the
         // placeholder hash, it implies that there's pre-genesis state present.
@@ -106,28 +105,58 @@ impl<'a, PS: ProtocolSpec> VerifiedStateView<'a, PS> {
             reader,
             latest_persistent_version,
             latest_persistent_state_root,
-            speculative_state,
+            speculative_state: speculative_state.freeze(),
             account_to_state_cache: RwLock::new(HashMap::new()),
             account_to_proof_cache: RwLock::new(HashMap::new()),
         }
     }
-}
 
-impl<'a, PS: ProtocolSpec> From<VerifiedStateView<'a, PS>>
-    for (
+    pub fn unpack_after_execution(
+        self,
+    ) -> (
         HashMap<AccountAddress, AccountState>,
         HashMap<HashValue, SparseMerkleProof<AccountStateBlob>>,
-    )
-{
-    fn from(view: VerifiedStateView<'a, PS>) -> Self {
+        FrozenSparseMerkleTree<AccountStateBlob>,
+    ) {
         (
-            view.account_to_state_cache.into_inner(),
-            view.account_to_proof_cache.into_inner(),
+            self.account_to_state_cache.into_inner(),
+            self.account_to_proof_cache.into_inner(),
+            self.speculative_state,
         )
     }
 }
 
-impl<'a, PS: ProtocolSpec> StateView for VerifiedStateView<'a, PS> {
+impl From<VerifiedStateView>
+    for (
+        HashMap<AccountAddress, AccountState>,
+        HashMap<HashValue, SparseMerkleProof<AccountStateBlob>>,
+        FrozenSparseMerkleTree<AccountStateBlob>,
+    )
+{
+    fn from(view: VerifiedStateView) -> Self {
+        view.unpack_after_execution()
+    }
+}
+
+pub struct StateCache {
+    pub frozen_base: FrozenSparseMerkleTree<AccountStateBlob>,
+    pub accounts: HashMap<AccountAddress, AccountState>,
+    pub proofs: HashMap<HashValue, SparseMerkleProof<AccountStateBlob>>,
+}
+
+impl From<VerifiedStateView> for StateCache {
+    fn from(view: VerifiedStateView) -> Self {
+        let (accounts, proofs, frozen_base) = view.unpack_after_execution();
+
+        Self {
+            frozen_base,
+            accounts,
+            proofs,
+        }
+    }
+}
+
+impl StateView for VerifiedStateView {
     fn id(&self) -> StateViewId {
         self.id
     }
@@ -196,10 +225,4 @@ impl<'a, PS: ProtocolSpec> StateView for VerifiedStateView<'a, PS> {
     fn is_genesis(&self) -> bool {
         self.latest_persistent_version.is_none()
     }
-}
-
-pub mod default_protocol {
-    use diem_types::protocol_spec::DpnProto;
-
-    pub type VerifiedStateView<'a> = super::VerifiedStateView<'a, DpnProto>;
 }

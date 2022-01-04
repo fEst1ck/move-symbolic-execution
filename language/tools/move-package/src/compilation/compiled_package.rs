@@ -10,18 +10,16 @@ use crate::{
     },
     BuildConfig,
 };
-use abigen::{Abigen, AbigenOptions};
 use anyhow::Result;
-use bytecode_source_map::utils::source_map_from_file;
 use colored::Colorize;
-use docgen::{Docgen, DocgenOptions};
+use move_abigen::{Abigen, AbigenOptions};
 use move_binary_format::file_format::{CompiledModule, CompiledScript};
+use move_bytecode_source_map::utils::source_map_from_file;
 use move_bytecode_utils::Modules;
 use move_command_line_common::files::{
     extension_equals, find_filenames, MOVE_COMPILED_EXTENSION, MOVE_EXTENSION, SOURCE_MAP_EXTENSION,
 };
-use move_core_types::language_storage::ModuleId;
-use move_lang::{
+use move_compiler::{
     compiled_unit::{
         AnnotatedCompiledUnit, CompiledUnit, NamedCompiledModule, NamedCompiledScript,
     },
@@ -29,6 +27,8 @@ use move_lang::{
     shared::{Flags, NumericalAddress},
     Compiler,
 };
+use move_core_types::language_storage::ModuleId;
+use move_docgen::{Docgen, DocgenOptions};
 use move_model::{model::GlobalEnv, options::ModelBuilderOptions, run_model_builder_with_options};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -198,7 +198,7 @@ impl OnDiskCompiledPackage {
                             let id = module.self_id();
                             let parsed_addr = NumericalAddress::new(
                                 id.address().into_bytes(),
-                                move_lang::shared::NumberFormat::Hex,
+                                move_compiler::shared::NumberFormat::Hex,
                             );
                             let module_name = FileName::from(id.name().as_str());
                             (parsed_addr, module_name)
@@ -372,14 +372,44 @@ impl CompiledPackage {
         self.dependencies.iter().chain(vec![self])
     }
 
-    pub fn modules(&self) -> impl Iterator<Item = &CompiledUnitWithSource> {
-        self.compiled_units
+    pub fn compiled_modules(&self) -> Modules {
+        Modules::new(
+            self.compiled_units
+                .iter()
+                .filter_map(|unit| match &unit.unit {
+                    CompiledUnit::Module(NamedCompiledModule { module, .. }) => Some(module),
+                    CompiledUnit::Script(_) => None,
+                }),
+        )
+    }
+
+    pub fn modules(&self) -> Result<impl Iterator<Item = &CompiledUnitWithSource>> {
+        let mut lookup_modules: BTreeMap<_, _> = self
+            .compiled_units
             .iter()
-            .filter(|unit| matches!(unit.unit, CompiledUnit::Module(_)))
+            .filter_map(|unit| match &unit.unit {
+                CompiledUnit::Module(NamedCompiledModule { module, .. }) => {
+                    Some((module.self_id(), unit))
+                }
+                CompiledUnit::Script(_) => None,
+            })
+            .collect();
+
+        let dep_graph: Vec<_> = self
+            .transitive_compiled_modules()
+            .compute_dependency_graph()
+            .compute_topological_order()?
+            .cloned()
+            .collect();
+
+        Ok(dep_graph
+            .into_iter()
+            .map(|module| module.self_id())
+            .flat_map(move |module_id| lookup_modules.remove(&module_id)))
     }
 
     pub fn get_module_by_name(&self, module_name: &str) -> Result<&CompiledUnitWithSource> {
-        self.modules()
+        self.modules()?
             .find(|unit| unit.unit.name().as_str() == module_name)
             .ok_or_else(|| {
                 anyhow::format_err!(
@@ -510,8 +540,10 @@ impl CompiledPackage {
             .resolution_table
             .iter()
             .map(|(ident, addr)| {
-                let parsed_addr =
-                    NumericalAddress::new(addr.into_bytes(), move_lang::shared::NumberFormat::Hex);
+                let parsed_addr = NumericalAddress::new(
+                    addr.into_bytes(),
+                    move_compiler::shared::NumberFormat::Hex,
+                );
                 (ident.to_string(), parsed_addr)
             })
             .collect::<BTreeMap<_, _>>();

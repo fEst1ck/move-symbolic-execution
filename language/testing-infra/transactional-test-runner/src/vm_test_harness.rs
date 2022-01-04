@@ -7,12 +7,17 @@ use crate::{
     framework::{run_test_impl, CompiledState, MoveTestAdapter},
     tasks::{EmptyCommand, InitCommand, RawAddress, SyntaxChoice, TaskInput},
 };
-use anyhow::*;
+use anyhow::{anyhow, Result};
 use move_binary_format::{
     access::ModuleAccess,
     errors::{Location, VMError, VMResult},
     file_format::CompiledScript,
     CompiledModule,
+};
+use move_compiler::{
+    compiled_unit::AnnotatedCompiledUnit,
+    shared::{verify_and_create_named_address_mapping, NumericalAddress},
+    FullyCompiledProgram,
 };
 use move_core_types::{
     account_address::AccountAddress,
@@ -21,18 +26,13 @@ use move_core_types::{
     resolver::MoveResolver,
     transaction_argument::{convert_txn_args, TransactionArgument},
 };
-use move_lang::{
-    compiled_unit::AnnotatedCompiledUnit,
-    shared::{verify_and_create_named_address_mapping, NumericalAddress},
-    FullyCompiledProgram,
-};
+use move_resource_viewer::MoveValueAnnotator;
 use move_stdlib::move_stdlib_named_addresses;
 use move_symbol_pool::Symbol;
 use move_vm_runtime::{move_vm::MoveVM, session::Session};
 use move_vm_test_utils::InMemoryStorage;
 use move_vm_types::gas_schedule::GasStatus;
 use once_cell::sync::Lazy;
-use resource_viewer::MoveValueAnnotator;
 
 const STD_ADDR: AccountAddress =
     AccountAddress::new([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
@@ -130,7 +130,7 @@ impl<'a> MoveTestAdapter<'a> for SimpleVMTestAdapter<'a> {
         for module in &*MOVE_STDLIB_COMPILED {
             let bytes = NumericalAddress::new(
                 module.address().into_bytes(),
-                move_lang::shared::NumberFormat::Hex,
+                move_compiler::shared::NumberFormat::Hex,
             );
             let named_addr = *addr_to_name_mapping.get(&bytes).unwrap();
             adapter.compiled_state.add(Some(named_addr), module.clone());
@@ -170,7 +170,7 @@ impl<'a> MoveTestAdapter<'a> for SimpleVMTestAdapter<'a> {
         txn_args: Vec<TransactionArgument>,
         gas_budget: Option<u64>,
         _extra_args: Self::ExtraRunArgs,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         let signers: Vec<_> = signers
             .into_iter()
             .map(|addr| self.compiled_state().resolve_address(&addr))
@@ -187,7 +187,8 @@ impl<'a> MoveTestAdapter<'a> for SimpleVMTestAdapter<'a> {
                 "Script execution failed with VMError: {}",
                 format_vm_error(&e)
             )
-        })
+        })?;
+        Ok(None)
     }
 
     fn call_function(
@@ -199,7 +200,7 @@ impl<'a> MoveTestAdapter<'a> for SimpleVMTestAdapter<'a> {
         txn_args: Vec<TransactionArgument>,
         gas_budget: Option<u64>,
         _extra_args: Self::ExtraRunArgs,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         let signers: Vec<_> = signers
             .into_iter()
             .map(|addr| self.compiled_state().resolve_address(&addr))
@@ -214,7 +215,8 @@ impl<'a> MoveTestAdapter<'a> for SimpleVMTestAdapter<'a> {
                 "Function execution failed with VMError: {}",
                 format_vm_error(&e)
             )
-        })
+        })?;
+        Ok(None)
     }
 
     fn view_data(
@@ -281,10 +283,10 @@ impl<'a> SimpleVMTestAdapter<'a> {
 }
 
 static PRECOMPILED_MOVE_STDLIB: Lazy<FullyCompiledProgram> = Lazy::new(|| {
-    let program_res = move_lang::construct_pre_compiled_lib(
+    let program_res = move_compiler::construct_pre_compiled_lib(
         &move_stdlib::move_stdlib_files(),
         None,
-        move_lang::Flags::empty().set_sources_shadow_deps(false),
+        move_compiler::Flags::empty().set_sources_shadow_deps(false),
         move_stdlib::move_stdlib_named_addresses(),
     )
     .unwrap();
@@ -292,24 +294,24 @@ static PRECOMPILED_MOVE_STDLIB: Lazy<FullyCompiledProgram> = Lazy::new(|| {
         Ok(stdlib) => stdlib,
         Err((files, errors)) => {
             eprintln!("!!!Standard library failed to compile!!!");
-            move_lang::diagnostics::report_diagnostics(&files, errors)
+            move_compiler::diagnostics::report_diagnostics(&files, errors)
         }
     }
 });
 
 static MOVE_STDLIB_COMPILED: Lazy<Vec<CompiledModule>> = Lazy::new(|| {
-    let (files, units_res) = move_lang::Compiler::new(&move_stdlib::move_stdlib_files(), &[])
+    let (files, units_res) = move_compiler::Compiler::new(&move_stdlib::move_stdlib_files(), &[])
         .set_named_address_values(move_stdlib::move_stdlib_named_addresses())
         .build()
         .unwrap();
     match units_res {
         Err(diags) => {
             eprintln!("!!!Standard library failed to compile!!!");
-            move_lang::diagnostics::report_diagnostics(&files, diags)
+            move_compiler::diagnostics::report_diagnostics(&files, diags)
         }
         Ok((_, warnings)) if !warnings.is_empty() => {
             eprintln!("!!!Standard library failed to compile!!!");
-            move_lang::diagnostics::report_diagnostics(&files, warnings)
+            move_compiler::diagnostics::report_diagnostics(&files, warnings)
         }
         Ok((units, _warnings)) => units
             .into_iter()

@@ -4,12 +4,16 @@
 use crate::{shared, shared::Home};
 use anyhow::Result;
 use diem_config::config::NodeConfig;
-use diem_types::{chain_id::ChainId, on_chain_config::VMPublishingOption};
+use diem_types::{
+    account_address::AccountAddress, chain_id::ChainId, on_chain_config::VMPublishingOption,
+};
 use std::path::{Path, PathBuf};
 
 const LAZY_ENABLED: bool = true;
 
 pub fn handle(home: &Home, genesis: Option<String>) -> Result<()> {
+    home.generate_shuffle_path_if_nonexistent()?;
+    home.write_default_networks_config_into_toml_if_nonexistent()?;
     if !home.get_node_config_path().is_dir() {
         println!(
             "Creating node config in {}",
@@ -72,7 +76,8 @@ fn genesis_modules_from_path(genesis: &Option<String>) -> Result<Vec<Vec<u8>>> {
 
     println!("Using custom genesis: {}", path.display());
     let mut genesis_modules: Vec<Vec<u8>> = Vec::new();
-    let compiled_package = shared::build_move_package(path)?;
+    let compiled_package =
+        shared::build_move_package(path, &AccountAddress::from_hex_literal("0x1")?)?;
     for module in compiled_package
         .transitive_compiled_modules()
         .compute_dependency_graph()

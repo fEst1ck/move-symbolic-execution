@@ -6,10 +6,7 @@ use diem_data_client::{Response, ResponsePayload};
 use diem_types::{
     account_state_blob::AccountStatesChunkWithProof,
     ledger_info::LedgerInfoWithSignatures,
-    transaction::{
-        default_protocol::{TransactionListWithProof, TransactionOutputListWithProof},
-        Version,
-    },
+    transaction::{TransactionListWithProof, TransactionOutputListWithProof, Version},
 };
 use std::fmt::{Debug, Formatter};
 
@@ -85,7 +82,7 @@ pub struct NumberOfAccountsRequest {
 pub struct TransactionsWithProofRequest {
     pub start_version: Version,
     pub end_version: Version,
-    pub max_proof_version: Version,
+    pub proof_version: Version,
     pub include_events: bool,
 }
 
@@ -94,7 +91,7 @@ pub struct TransactionsWithProofRequest {
 pub struct TransactionOutputsWithProofRequest {
     pub start_version: Version,
     pub end_version: Version,
-    pub max_proof_version: Version,
+    pub proof_version: Version,
 }
 
 /// A pending client response where data has been requested from the

@@ -12,7 +12,6 @@ defaults:
 
 env:
   max_threads: 16
-  nextest_tries: 3
   pre_command: cd /opt/git/diem/
 
 jobs:
@@ -74,7 +73,7 @@ jobs:
         name: build extra images if it is needed by LBT
         if: ${{ github.event_name == 'push' && steps.need-land-blocking-test.outputs.need-lbt == 'true' }}
         run: |
-          res=true
+          res=false
           branches="${{ secrets.BRANCHES_TO_ENABLE_LBT_COMPAT_SUITE }}"
           if ! [[ -z "${branches}" ]] && [[ "${branches}" =~ .*"${{ steps.changes.outputs.changes-target-branch }}".* ]];  then
             echo "LBT compatibility suite is enabled. Will use land_blocking_compat suite."
@@ -87,7 +86,7 @@ jobs:
       - id: need-compat-tests
         name: determine if compat tests should run
         run: |
-          res=true
+          res=false
           branches="${{ secrets.BRANCHES_TO_DISABLE_COMPAT_TESTS }}"
           if ! [[ -z "${branches}" ]] && [[ "${branches}" =~ .*"${{ steps.changes.outputs.changes-target-branch }}".* ]];  then
             echo "compatibility suite is NOT enabled."
@@ -114,7 +113,7 @@ jobs:
         name: find shell/dockerfile changes
         uses: diem/actions/matches@faadd16607b77dfa2231a8f366883e01717b3225
         with:
-          pattern: 'Dockerfile$\|.*.sh$\|^developers.diem.com'
+          pattern: 'Dockerfile$\|.*.sh$\|^developers.diem.com\|^shuffle'
       - id: helm-changes
         name: find helm changes
         uses: diem/actions/matches@faadd16607b77dfa2231a8f366883e01717b3225
@@ -179,7 +178,7 @@ jobs:
     strategy:
       matrix:
         target_images:
-          [client faucet cluster-test forge, init tools validator validator-tcb]
+          [faucet forge, init tools validator validator-tcb]
     steps:
       - uses: actions/checkout@v2.4.0
         with:
@@ -290,207 +289,6 @@ jobs:
             echo "PREV_TAG=$compat_prev_tag" >> $GITHUB_ENV
             echo "BUILD_PREV=0" >> $GITHUB_ENV
           fi
-      - name: build extra images
-        id: build-extra-images
-        run: |
-          res=land_$BASE_GIT_REV
-          if [ $BUILD_PREV -eq 1 ]; then
-            compat_prev_tag=$res
-            echo "Starting codebuild for $compat_prev_tag"
-            VERSION=$BASE_GIT_REV ADDL_TAG=$compat_prev_tag .github/actions/land-blocking/cti-codebuild.sh &> codebuild-prev.log &
-            prev_build_pid=$!
-            wait $prev_build_pid
-            echo "====== codebuild-prev.log start ======"
-            cat codebuild-prev.log
-          else
-            res=$PREV_TAG;
-          fi
-          echo "::set-output name=prev-tag::$(echo $res)";
-      - name: Early terminate workflow
-        if: ${{ failure() }}
-        uses: ./.github/actions/early-terminator
-        with:
-          github-token: ${{secrets.GITHUB_TOKEN}}
-
-  land-blocking-test:
-    name: Run land blocking test
-    runs-on: self-hosted
-    needs: [prepare, build-images, need-base-images]
-    if: ${{ always() && needs.build-images.result=='success' && needs.prepare.outputs.test-land-blocking == 'true' }}
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v2.4.0
-        with:
-          # This ensures that the tip of the PR is checked out instead of the merge between the base ref and the tip
-          # On `push` this value will be empty and will "do-the-right-thing"
-          ref: ${{ github.event.pull_request.head.sha }}
-      - name: Launch cluster test
-        # NOTE Remember to update PR comment payload if cti cmd is updated.
-        run: |
-          set +e
-          date
-          export CTI_OUTPUT_LOG=$(mktemp)
-          echo "CTI_OUTPUT_LOG=$CTI_OUTPUT_LOG" >> $GITHUB_ENV
-          cmd=""
-          if ${{ needs.need-base-images.result!='success' }}; then
-            cmd="./scripts/cti --tag ${{ needs.build-images.outputs.head-tag }} --report report.json --suite land_blocking"
-          else
-            cmd="./scripts/cti --tag ${{ needs.need-base-images.outputs.prev-tag }} --cluster-test-tag ${{ needs.build-images.outputs.head-tag }} -E BATCH_SIZE=15 -E UPDATE_TO_TAG=${{ needs.build-images.outputs.head-tag }} --report report.json --suite land_blocking_compat"
-          fi
-          eval $cmd
-          ret=$?
-          echo "cti exit code: $ret"
-          echo "CTI_REPRO_CMD=$cmd" >> $GITHUB_ENV
-          echo "CTI_EXIT_CODE=$ret" >> $GITHUB_ENV
-          msg_text="*${{ github.job }}* job in ${{ github.workflow }} workflow failed for PR ${{ needs.prepare.outputs.changes-pull-request-number }}."
-          if [ -s "report.json" ]; then
-            echo "report.json start"
-            cat report.json
-            echo "report.json end"
-            msg_text="$msg_text Report:\n$(cat report.json)"
-          else
-            echo "report.json is empty or not found."
-            msg_text="$msg_text Report:\nEmpty"
-            ret=1
-          fi
-          if [ $ret -ne 0 ]; then
-            jq -n \
-              --arg msg "$msg_text" \
-              --arg url "https://github.com/${{ github.repository }}/actions/runs/${{github.run_id}}" \
-              --arg pr_url "https://github.com/${{ github.repository }}/pull/${{ needs.prepare.outputs.changes-pull-request-number }}" \
-            '{
-              "attachments": [
-                {
-                  "text": $msg,
-                  "actions": [
-                    {
-                      "type": "button",
-                      "text": "Visit Job",
-                      "url": $url
-                    },
-                    {
-                      "type": "button",
-                      "text": "Visit PR",
-                      "url": $pr_url
-                    }
-                  ]
-                }
-              ]
-            }' > /tmp/payload
-            curl -X POST -H 'Content-type: application/json' -d @/tmp/payload ${{ secrets.WEBHOOK_FLAKY_LAND_BLOCKING_CT }}
-          fi
-      - name: Post test results on PR
-        uses: actions/github-script@v4.0.2
-        with:
-          github-token: ${{secrets.GITHUB_TOKEN}}
-          script: |
-            // Find the number of the pull request that trigggers this push
-            let pr_num = ${{ needs.prepare.outputs.changes-pull-request-number }};
-            if (!pr_num) {
-              console.warn("Did not find pull request num in previous step");
-              console.log("GH event payload\n", context.payload);
-              return;
-            }
-            // Read and check cluster test results
-            let should_fail = false;
-            let env_vars = process.env;
-            let body = '';
-            const fsp = require('fs').promises;
-            try {
-              data = await fsp.readFile('report.json', 'utf-8');
-              var result = JSON.parse(data);
-              // TODO - set P/F based on metrics TPS, latency
-              body = `Cluster Test Result
-            \`\`\`
-            ${result.text}
-            ${result.links}
-            \`\`\`
-            `;
-              // Check CTI exit code for errors
-              if (parseInt(env_vars.CTI_EXIT_CODE) != 0) {
-                body += "\n :exclamation: Cluster Test failed - non-zero exit code for `cti` \n"
-                should_fail = true;
-              } else {
-                let tps = result.metrics.find(m => m.experiment == "all up" && m.metric == "avg_tps").value;
-                let min_tps = 1100;
-                if (tps < min_tps) {
-                  body += "\n :exclamation: Performance regression is detected on this PR";
-                  body += "\n TPS with PR: " + tps + ", this is lower then minimum allowed " + min_tps + " TPS.";
-                  console.log(body);
-                  should_fail = true;
-                }
-              }
-            } catch (err) {
-              if (err.code === 'ENOENT') {
-                body = "Cluster Test failed - no test report found.\n";
-                // Check Cluster Test output log for infra error
-                try {
-                  cti_log = await fsp.readFile(env_vars.CTI_OUTPUT_LOG, 'utf-8');
-                  let re = /.*(^Failed\sto\s.*\"Service\sUnavailable.\sPlease\stry\sagain\slater\.\".*)/;
-                  if (re.test(cti_log)) {
-                    let match = re.exec(cti_log);
-                    body += " There was service infra error:\n";
-                    body += `
-                    ${match[1]}
-                    `
-                    + "\n"
-                    ;
-                    body += "To retry, comment your PR with `/land`.";
-                    body += " If that doesn't trigger re-run, amend and push again.";
-                  }
-                } catch (err) {
-                  console.error("Failed to check infra error in CT output log.\n", err);
-                }
-              } else {
-                body = "Cluster Test runner failed.";
-                console.error(err);
-              }
-              body += " See https://github.com/diem/diem/actions/runs/${{github.run_id}}";
-              // Post comment on PR then fail this workflow
-              should_fail = true;
-            }
-            // Add repro cmd to message
-            try {
-              body += "\nRepro cmd:\n";
-              body += `
-              \`\`\`
-              ${env_vars.CTI_REPRO_CMD}
-              \`\`\`
-              `
-            } catch (err) {
-              if (err.code === 'ReferenceError') {
-                console.error("One of the following env vars is not set");
-              } else {
-                body += "[GHA DEBUG]\nFound error in actions/github-script\n";
-                body += err;
-              }
-            }
-            // Post test result on original pull request
-            try {
-              if (!should_fail) {
-                body += "\n :tada: Land-blocking cluster test passed! :ok_hand:"
-              }
-              await github.issues.createComment(
-                  {
-                    issue_number: pr_num,
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    body: body,
-                  }
-              );
-            } catch (err) {
-              if (err.status === 401) {
-                // Fail silently for auth but log to console.
-                console.warn("GH token has expired when trying to POST\n", err);
-              } else {
-                console.error("HttpError other than 401 is not bypassed");
-                throw err;
-              }
-            }
-            // Fail the workflow if test fails or perf regresses
-            if (should_fail) {
-              throw "Land-blocking test failed";
-            }
       - name: Early terminate workflow
         if: ${{ failure() }}
         uses: ./.github/actions/early-terminator
@@ -577,7 +375,7 @@ jobs:
           key: ${{ needs.prepare.outputs.changes-target-branch }}
       - name: run unit tests
         run: |
-          $pre_command && mkdir -p target/junit-reports && cargo nextest --jobs ${max_threads} --tries ${nextest_tries} --unit --failure-output=immediate-final --changed-since "origin/$TARGET_BRANCH" --junit target/junit-reports/unit-test.xml
+          $pre_command && cargo nextest --nextest-profile ci --jobs ${max_threads} --test-threads ${max_threads} --unit --changed-since "origin/$TARGET_BRANCH"
         env:
           TARGET_BRANCH: ${{ needs.prepare.outputs.changes-target-branch }}
       - name: run jsonrpc integration tests
@@ -590,6 +388,10 @@ jobs:
           $pre_command && cargo xtest --doc --jobs ${max_threads} --unit --changed-since "origin/$TARGET_BRANCH"
         env:
           TARGET_BRANCH: ${{ needs.prepare.outputs.changes-target-branch }}
+      - name: organize unit test results
+        if: always()
+        run: |
+          $pre_command && mkdir -p target/junit-reports && mv target/nextest/ci/junit.xml target/junit-reports/unit-test.xml
       - name: upload unit test results
         if: always()
         uses: actions/upload-artifact@v2
@@ -623,9 +425,13 @@ jobs:
           key: ${{ needs.prepare.outputs.changes-target-branch }}
       - name: run codegen unit tests
         run: |
-          $pre_command && mkdir -p target/junit-reports && cargo nextest --jobs ${max_threads} --tries ${nextest_tries} --failure-output=immediate-final -p transaction-builder-generator -p shuffle --unit --changed-since "origin/$TARGET_BRANCH" --run-ignored=ignored-only --junit target/junit-reports/codegen-unit-test.xml
+          source $HOME/.profile && $pre_command && cargo nextest --nextest-profile ci --jobs ${max_threads} --test-threads ${max_threads} -p transaction-builder-generator -p shuffle --unit --changed-since "origin/$TARGET_BRANCH" --run-ignored=ignored-only
         env:
           TARGET_BRANCH: ${{ needs.prepare.outputs.changes-target-branch }}
+      - name: organize codegen test results
+        if: always()
+        run: |
+          $pre_command && mkdir -p target/junit-reports && mv target/nextest/ci/junit.xml target/junit-reports/codegen-unit-test.xml
       - name: upload codegen test results
         if: always()
         uses: actions/upload-artifact@v2
@@ -773,22 +579,12 @@ jobs:
         run: docker/diem-build.sh docker/validator/Dockerfile diem/validator:test
       - name: build faucet image
         run: docker/diem-build.sh docker/faucet/Dockerfile diem/faucet:test
-      - name: build client image
-        run: docker/diem-build.sh docker/client/Dockerfile diem/client:test
       - name: run validator-client test
         run: docker/compose/test_docker_compose.sh
         env:
           # this overrides the default docker tag of "testnet"
           IMAGE_TAG: "test"
       - name: run sdk-compatibility tests from main
-        run: cd sdk/compatibility && cargo test -- --include-ignored
-        env:
-          JSON_RPC_URL: "http://127.0.0.1:8080"
-          FAUCET_URL: "http://127.0.0.1:8000"
-      - uses: actions/checkout@v2.4.0
-        with:
-          ref: diem-core-v1.4.1
-      - name: run sdk-compatibility tests from release
         run: cd sdk/compatibility && cargo test -- --include-ignored
         env:
           JSON_RPC_URL: "http://127.0.0.1:8080"
@@ -873,16 +669,16 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
       - name: Check machine details for minikube
         run: |
-          kubectl version
+          kubectl version --client
           helm version
           lscpu
       - name: Helm lint
         working-directory: helm
         run: helm lint fullnode
-      - name: Install minikube v1.17.1
+      - name: Install minikube v1.24.0
         run: |
-          curl -LO https://storage.googleapis.com/minikube/releases/v1.17.1/minikube-linux-amd64
-          checksum="03a6d6cccecb7a33a09afc6dae40d8d76ccfe168aa4aba1a18c1f45bbab120c2"
+          curl -LO https://storage.googleapis.com/minikube/releases/v1.24.0/minikube-linux-amd64
+          checksum="3bc218476cf205acf11b078d45210a4882e136d24a3cbb7d8d645408e423b8fe"
           filename=minikube-linux-amd64
           if [[ $(sha256sum $filename | awk '{print $1}') != "$checksum" ]]; then
             echo "$filename checksum mismatch"
@@ -1002,7 +798,12 @@ jobs:
       - run: $pre_command && cargo xcheck -j ${max_threads} --workspace --all-targets
       - run: |
           $pre_command && rustup target add powerpc-unknown-linux-gnu
+          # disable the workspace-hack because it contains some code that doesn't build on powerpc
+          $pre_command && cargo x generate-workspace-hack --mode disable
           $pre_command && cargo xcheck -j ${max_threads} -p diem-transaction-builder -p move-vm-types --target powerpc-unknown-linux-gnu
+          # we can't just re-enable the workspace-hack at the end, because it can result in a different
+          # Cargo.lock resolution result in some cases. So use git reset instead.
+          $pre_command && git reset --hard HEAD
       - uses: ./.github/actions/build-teardown
       - name: Early terminate workflow
         if: ${{ failure() }}
@@ -1147,7 +948,6 @@ jobs:
           # On `push` this value will be empty and will "do-the-right-thing"
           ref: ${{ github.event.pull_request.head.sha }}
       - name: Launch forge test
-        # NOTE Remember to update PR comment payload if cti cmd is updated.
         run: |
           set +e
           date
@@ -1155,7 +955,7 @@ jobs:
           echo "FGI_OUTPUT_LOG=$FGI_OUTPUT_LOG" >> $GITHUB_ENV
           cmd=""
           if ${{ needs.need-base-images.result!='success' }}; then
-            cmd="./scripts/fgi/run --tag ${{ needs.build-images.outputs.head-tag }} --suite land_blocking"
+            cmd="./scripts/fgi/run --tag ${{ needs.build-images.outputs.head-tag }} --suite land_blocking --report forge_report.json"
           else
             cmd="./scripts/fgi/run --tag ${{ needs.build-images.outputs.head-tag }} --base-image-tag ${{ needs.need-base-images.outputs.prev-tag }} --suite land_blocking_compat --report forge_report.json"
           fi
@@ -1250,67 +1050,8 @@ jobs:
             if (should_fail) {
               throw "Land-blocking test failed";
             }
-      - name: Post test results on PR
-        id: post-test-result
-        if: always()
-        # set result to do comparison instead of fail workflow
-        # once we turn off CT and turn on forge, will post forge testing result instead
-        run: |
-          if [ $FGI_EXIT_CODE -eq 1 ]; then
-            echo "::set-output name=forge-result::failed";
-          else
-            echo "::set-output name=forge-result::success";
-          fi
       - name: Early terminate workflow
         if: ${{ failure() }}
         uses: ./.github/actions/early-terminator
         with:
           github-token: ${{secrets.GITHUB_TOKEN}}
-
-  #this is a temp job here to compare lbt signals between Forge and Cluster Test
-  #it will be removed once Forge LBT is turned on
-  compare_lbt_signals:
-    name: compare-lbt_signals
-    runs-on: ubuntu-20.04
-    timeout-minutes: 2
-    #always run this job even if needed jobs failed or are skipped.
-    if: ${{ always() && needs.land-blocking-test.result!='skipped' && needs.land-blocking-test-forge.result!='skipped'}}
-    needs:
-      - prepare
-      - land-blocking-test
-      - land-blocking-test-forge
-    steps:
-      - run: |
-          success="${{
-            needs.land-blocking-test.result==needs.land-blocking-test-forge.outputs.forge-result
-          }}"
-          if [[ "$success" != "true" ]]; then
-            jq -n \
-              --arg msg "Alert: Two LBT tests results are mismatch. CT ${{needs.land-blocking-test.result}} != Forge ${{needs.land-blocking-test-forge.outputs.forge-result}}" \
-              --arg url "https://github.com/${{ github.repository }}/actions/runs/${{github.run_id}}" \
-              --arg pr_url "https://github.com/${{ github.repository }}/pull/${{ needs.prepare.outputs.changes-pull-request-number }}" \
-            '{
-              "attachments": [
-              {
-                "text": $msg,
-                "actions": [
-                {
-                  "type": "button",
-                  "text": "Visit Job",
-                  "url": $url
-                },
-                {
-                  "type": "button",
-                  "text": "Visit PR",
-                  "url": $pr_url
-                }
-                ]
-              }
-              ]
-            }' > /tmp/payload
-            curl -X POST -H 'Content-type: application/json' -d @/tmp/payload ${{ secrets.WEBHOOK_FORGE }}
-          fi
-      - name: Clean up
-        # always step here to avoid break workflow
-        if: ${{ always() }}
-        run: echo "===== forge tests done ===="

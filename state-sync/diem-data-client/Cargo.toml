@@ -12,18 +12,20 @@ edition = "2018"
 [dependencies]
 async-trait = "0.1.42"
 futures = "0.3.12"
+itertools = "0.10.0"
 rand = "0.8.3"
 serde = { version = "1.0.124", default-features = false }
 thiserror = "1.0.24"
 
 diem-config = { path = "../../config" }
 diem-crypto = { path = "../../crates/diem-crypto" }
-diem-id-generator = { path = "../../common/id-generator" }
-diem-infallible = { path = "../../common/infallible" }
-diem-logger = { path = "../../common/logger" }
-diem-time-service = { path = "../../common/time-service", features = ["async"] }
+diem-id-generator = { path = "../../crates/diem-id-generator" }
+diem-infallible = { path = "../../crates/diem-infallible" }
+diem-logger = { path = "../../crates/diem-logger" }
+diem-metrics = { path = "../../crates/diem-metrics" }
+diem-time-service = { path = "../../crates/diem-time-service", features = ["async"] }
 diem-types = { path = "../../types" }
-diem-workspace-hack = { path = "../../common/workspace-hack" }
+diem-workspace-hack = { version = "0.1", path = "../../crates/diem-workspace-hack" }
 network = { path = "../../network" }
 storage-service-client = { path = "../storage-service/client" }
 storage-service-types = { path = "../storage-service/types" }
@@ -35,6 +37,6 @@ maplit = "1.0.2"
 tokio = { version = "1.8.1", features = ["rt", "macros"], default-features = false }
 
 bcs = "0.1.2"
-channel = { path = "../../common/channel" }
-diem-time-service = { path = "../../common/time-service", features = ["async", "testing"] }
+channel = { path = "../../crates/channel" }
+diem-time-service = { path = "../../crates/diem-time-service", features = ["async", "testing"] }
 network = { path = "../../network", features = ["fuzzing"] }

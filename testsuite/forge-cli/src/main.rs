@@ -1,11 +1,8 @@
 // Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use diem_sdk::{
-    client::{BlockingClient, MethodRequest},
-    move_types::account_address::AccountAddress,
-    transaction_builder::Currency,
-};
+use diem_rest_client::Client as RestClient;
+use diem_sdk::{move_types::account_address::AccountAddress, transaction_builder::Currency};
 use forge::{ForgeConfig, Options, Result, *};
 use std::{env, num::NonZeroUsize, process, time::Duration};
 use structopt::StructOpt;
@@ -13,7 +10,9 @@ use testcases::{
     compatibility_test::SimpleValidatorUpgrade, fixed_tps_test::FixedTpsTest,
     gas_price_test::NonZeroGasPrice, generate_traffic, partial_nodes_down_test::PartialNodesDown,
     performance_test::PerformanceBenchmark, reconfiguration_test::ReconfigurationTest,
+    state_sync_performance::StateSyncPerformance,
 };
+use tokio::runtime::Runtime;
 use url::Url;
 
 #[derive(StructOpt, Debug)]
@@ -23,12 +22,21 @@ struct Args {
     accounts_per_client: usize,
     #[structopt(long)]
     workers_per_ac: Option<usize>,
+    #[structopt(long, default_value = "0")]
+    wait_millis: u64,
+    #[structopt(long)]
+    burst: bool,
     #[structopt(flatten)]
     options: Options,
     #[structopt(long, help = "Specify a test suite to run")]
     suite: Option<String>,
     #[structopt(long, multiple = true)]
     changelog: Option<Vec<String>>,
+    #[structopt(
+        long,
+        help = "Whether transactions should be submitted to validators or full nodes"
+    )]
+    pub emit_to_validator: Option<bool>,
 
     // subcommand groups
     #[structopt(flatten)]
@@ -86,6 +94,11 @@ struct K8sSwarm {
     base_image_tag: String,
     #[structopt(long, help = "Name of the EKS cluster")]
     cluster_name: String,
+    #[structopt(
+        long,
+        help = "Path to flattened directory containing compiled Move modules"
+    )]
+    move_modules_dir: Option<String>,
 }
 
 #[derive(StructOpt, Debug)]
@@ -140,11 +153,27 @@ struct Resize {
     helm_repo: String,
     #[structopt(long, help = "Name of the EKS cluster")]
     cluster_name: String,
+    #[structopt(
+        long,
+        help = "Path to flattened directory containing compiled Move modules"
+    )]
+    move_modules_dir: Option<String>,
 }
 
 fn main() -> Result<()> {
     let args = Args::from_args();
+    let mut global_emit_job_request = EmitJobRequest::default()
+        .accounts_per_client(args.accounts_per_client)
+        .thread_params(EmitThreadParams {
+            wait_millis: args.wait_millis,
+            wait_committed: !args.burst,
+        });
+    if let Some(workers_per_endpoint) = args.workers_per_ac {
+        global_emit_job_request =
+            global_emit_job_request.workers_per_endpoint(workers_per_endpoint);
+    }
 
+    let runtime = Runtime::new()?;
     match args.cli_cmd {
         // cmd input for test
         CliCommand::Test(test_cmd) => match test_cmd {
@@ -153,11 +182,15 @@ fn main() -> Result<()> {
                 LocalFactory::from_workspace()?,
                 &args.options,
                 args.changelog,
+                global_emit_job_request,
             ),
             TestCommand::K8sSwarm(k8s) => {
                 let mut test_suite = k8s_test_suite();
                 if let Some(suite) = args.suite.as_ref() {
                     test_suite = get_test_suite(suite);
+                }
+                if let Some(move_modules_dir) = k8s.move_modules_dir {
+                    test_suite = test_suite.with_genesis_modules_path(move_modules_dir);
                 }
                 run_forge(
                     test_suite,
@@ -170,6 +203,7 @@ fn main() -> Result<()> {
                     .unwrap(),
                     &args.options,
                     args.changelog,
+                    global_emit_job_request,
                 )
             }
         },
@@ -182,22 +216,28 @@ fn main() -> Result<()> {
             ),
             OperatorCommand::CleanUp(cleanup) => {
                 uninstall_from_k8s_cluster()?;
-                set_eks_nodegroup_size(cleanup.cluster_name, 0, cleanup.auth_with_k8s_env)
+                runtime.block_on(set_eks_nodegroup_size(
+                    cleanup.cluster_name,
+                    0,
+                    cleanup.auth_with_k8s_env,
+                ))
             }
             OperatorCommand::Resize(resize) => {
-                set_eks_nodegroup_size(
+                runtime.block_on(set_eks_nodegroup_size(
                     resize.cluster_name,
                     resize.num_validators,
                     resize.auth_with_k8s_env,
-                )?;
+                ))?;
                 uninstall_from_k8s_cluster()?;
-                clean_k8s_cluster(
+                runtime.block_on(clean_k8s_cluster(
                     resize.helm_repo,
                     resize.num_validators,
                     resize.validator_image_tag,
                     resize.testnet_image_tag,
                     resize.require_validator_healthcheck,
-                )
+                    resize.move_modules_dir,
+                ))?;
+                Ok(())
             }
         },
     }
@@ -208,8 +248,9 @@ pub fn run_forge<F: Factory>(
     factory: F,
     options: &Options,
     logs: Option<Vec<String>>,
+    global_job_request: EmitJobRequest,
 ) -> Result<()> {
-    let forge = Forge::new(options, tests, factory);
+    let forge = Forge::new(options, tests, factory, global_job_request);
 
     if options.list {
         forge.list()?;
@@ -290,7 +331,7 @@ fn get_test_suite(suite_name: &str) -> ForgeConfig<'static> {
         "land_blocking_compat" => land_blocking_test_compat_suite(),
         "land_blocking" => land_blocking_test_suite(),
         "pre_release" => pre_release_suite(),
-        _ => k8s_test_suite(),
+        single_test => single_test_suite(single_test),
     }
 }
 
@@ -307,6 +348,18 @@ fn k8s_test_suite() -> ForgeConfig<'static> {
         .with_public_usage_tests(&[&FundAccount, &TransferCoins])
         .with_admin_tests(&[&GetMetadata])
         .with_network_tests(&[&EmitTransaction, &SimpleValidatorUpgrade])
+}
+
+fn single_test_suite(test_name: &str) -> ForgeConfig<'static> {
+    let config =
+        ForgeConfig::default().with_initial_validator_count(NonZeroUsize::new(30).unwrap());
+    match test_name {
+        "bench" => config.with_network_tests(&[&PerformanceBenchmark]),
+        "state_sync" => config.with_network_tests(&[&StateSyncPerformance]),
+        "compat" => config.with_network_tests(&[&SimpleValidatorUpgrade]),
+        "config" => config.with_network_tests(&[&ReconfigurationTest]),
+        _ => config.with_network_tests(&[&PerformanceBenchmark]),
+    }
 }
 
 fn land_blocking_test_suite() -> ForgeConfig<'static> {
@@ -335,6 +388,7 @@ fn pre_release_suite() -> ForgeConfig<'static> {
             &NonZeroGasPrice,
             &PartialNodesDown,
             &ReconfigurationTest,
+            &StateSyncPerformance,
         ])
 }
 
@@ -365,17 +419,19 @@ impl AdminTest for GetMetadata {
     }
 }
 
-pub fn check_account_balance(
-    client: &BlockingClient,
+pub async fn check_account_balance(
+    client: &RestClient,
     currency: Currency,
     account_address: AccountAddress,
     expected: u64,
 ) -> Result<()> {
-    let account_view = client.get_account(account_address)?.into_inner().unwrap();
-    let balance = account_view
-        .balances
+    let balances = client
+        .get_account_balances(account_address)
+        .await?
+        .into_inner();
+    let balance = balances
         .iter()
-        .find(|b| b.currency == currency)
+        .find(|b| b.currency_code() == currency)
         .unwrap();
     assert_eq!(balance.amount, expected);
 
@@ -393,14 +449,22 @@ impl Test for FundAccount {
 
 impl PublicUsageTest for FundAccount {
     fn run<'t>(&self, ctx: &mut PublicUsageContext<'t>) -> Result<()> {
-        let client = ctx.client();
+        let runtime = Runtime::new().unwrap();
+        runtime.block_on(self.async_run(ctx))
+    }
+}
+
+impl FundAccount {
+    async fn async_run(&self, ctx: &mut PublicUsageContext<'_>) -> Result<()> {
+        let client = ctx.rest_client();
 
         let account = ctx.random_account();
         let amount = 1000;
         let currency = Currency::XUS;
-        ctx.create_parent_vasp_account(account.authentication_key())?;
-        ctx.fund(account.address(), amount)?;
-        check_account_balance(&client, currency, account.address(), amount)?;
+        ctx.create_parent_vasp_account(account.authentication_key())
+            .await?;
+        ctx.fund(account.address(), amount).await?;
+        check_account_balance(&client, currency, account.address(), amount).await?;
 
         Ok(())
     }
@@ -417,12 +481,20 @@ impl Test for TransferCoins {
 
 impl PublicUsageTest for TransferCoins {
     fn run<'t>(&self, ctx: &mut PublicUsageContext<'t>) -> Result<()> {
+        let runtime = Runtime::new().unwrap();
+        runtime.block_on(self.async_run(ctx))
+    }
+}
+
+impl TransferCoins {
+    async fn async_run(&self, ctx: &mut PublicUsageContext<'_>) -> Result<()> {
         let mut account = ctx.random_account();
         let amount = 1000;
         let currency = Currency::XUS;
-        let client = ctx.client();
-        ctx.create_parent_vasp_account(account.authentication_key())?;
-        ctx.fund(account.address(), amount)?;
+        let client = ctx.rest_client();
+        ctx.create_parent_vasp_account(account.authentication_key())
+            .await?;
+        ctx.fund(account.address(), amount).await?;
 
         let mut payer = ctx.random_account();
         let payee = ctx.random_account();
@@ -442,25 +514,16 @@ impl PublicUsageTest for TransferCoins {
                 0,
             ),
         );
-        let batch = vec![
-            MethodRequest::submit(&create_payer)?,
-            MethodRequest::submit(&create_payee)?,
-        ];
-        client.batch(batch)?;
-        client.wait_for_signed_transaction(&create_payer, None, None)?;
-        client.wait_for_signed_transaction(&create_payee, None, None)?;
-        check_account_balance(&client, currency, payer.address(), 100)?;
+        client.submit(&create_payer).await?;
+        client.submit(&create_payee).await?;
+        client.wait_for_signed_transaction(&create_payer).await?;
+        client.wait_for_signed_transaction(&create_payee).await?;
+        check_account_balance(&client, currency, payer.address(), 100).await?;
 
-        ctx.transfer_coins(currency, &mut payer, payee.address(), 10)?;
-        check_account_balance(&client, currency, payer.address(), 90)?;
-        check_account_balance(&client, currency, payee.address(), 10)?;
-        let account_view = client.get_account(payee.address())?.into_inner().unwrap();
-        let balance = account_view
-            .balances
-            .iter()
-            .find(|b| b.currency == currency)
-            .unwrap();
-        assert_eq!(balance.amount, 10);
+        ctx.transfer_coins(currency, &mut payer, payee.address(), 10)
+            .await?;
+        check_account_balance(&client, currency, payer.address(), 90).await?;
+        check_account_balance(&client, currency, payee.address(), 10).await?;
 
         Ok(())
     }
@@ -477,15 +540,15 @@ impl Test for RestartValidator {
 
 impl NetworkTest for RestartValidator {
     fn run<'t>(&self, ctx: &mut NetworkContext<'t>) -> Result<()> {
-        let node = ctx.swarm().validators_mut().next().unwrap();
-        node.health_check().expect("node health check failed");
-        node.stop()?;
-        println!("Restarting node {}", node.peer_id());
-        node.start()?;
-        // wait node to recovery
-        std::thread::sleep(Duration::from_millis(1000));
-        node.health_check().expect("node health check failed");
-
+        let runtime = Runtime::new()?;
+        runtime.block_on(async {
+            let node = ctx.swarm().validators_mut().next().unwrap();
+            node.health_check().await.expect("node health check failed");
+            node.stop().unwrap();
+            println!("Restarting node {}", node.peer_id());
+            node.start().await.unwrap();
+            node.health_check().await.expect("node health check failed");
+        });
         Ok(())
     }
 }

@@ -11,6 +11,7 @@ edition = "2018"
 
 [dependencies]
 anyhow = "1.0.38"
+async-trait = "0.1.42"
 bcs = "0.1.2"
 proptest = "1.0.0"
 tokio = { version = "1.8.1", features = ["full"] }
@@ -20,17 +21,21 @@ reqwest = { version = "0.11.2", features = ["json"] }
 diem-config = { path = "../../config" }
 diem-crypto = { path = "../../crates/diem-crypto" }
 diem-events-fetcher = { path = "../../diem-move/diem-events-fetcher" }
+diem-experimental-framework-releases = { path = "../../diem-move/diem-framework/experimental/releases" }
 diem-framework = { path = "../../diem-move/diem-framework" }
 diem-framework-releases = { path = "../../diem-move/diem-framework/DPN/releases" }
+diem-json-rpc-types = { path = "../../json-rpc/types" }
 diem-sdk = { path = "../../sdk" }
 diem-rest-client = { path = "../../crates/diem-rest-client" }
-diem-temppath = { path = "../../common/temppath" }
+diem-temppath = { path = "../../crates/diem-temppath" }
+diem-transaction-builder = { path = "../../sdk/transaction-builder" }
 diem-transaction-replay = { path = "../../diem-move/transaction-replay" }
 move-command-line-common = { path = "../../language/move-command-line-common" }
 move-ir-compiler = { path = "../../language/move-ir-compiler" }
 move-stdlib = { path = "../../language/move-stdlib" }
 diem-types = { path = "../../types" }
 forge = { path = "../forge" }
+diem-workspace-hack = { version = "0.1", path = "../../crates/diem-workspace-hack" }
 
 [dev-dependencies]
 base64 = "0.13.0"
@@ -42,26 +47,28 @@ serde_yaml = "0.8.17"
 futures = "0.3.12"
 
 backup-cli = { path = "../../storage/backup/backup-cli" }
-debug-interface = { path = "../../common/debug-interface" }
+debug-interface = { path = "../../crates/debug-interface" }
 generate-key = { path = "../../config/generate-key" }
 diem-genesis-tool = {path = "../../config/management/genesis", features = ["testing"] }
 diem-global-constants = { path = "../../config/global-constants" }
-diem-infallible = { path = "../../common/infallible" }
+diem-infallible = { path = "../../crates/diem-infallible" }
 diem-json-rpc = { path = "../../json-rpc" }
 diem-json-rpc-types = { path = "../../json-rpc/types" }
 diem-key-manager = { path = "../../secure/key-manager" }
-diem-logger = { path = "../../common/logger" }
+diem-logger = { path = "../../crates/diem-logger" }
 diem-management = { path = "../../config/management", features = ["testing"] }
 diem-operational-tool = {path = "../../config/management/operational", features = ["testing"] }
 diem-secure-storage = { path = "../../secure/storage", features = ["testing"] }
-diem-swarm = { path = "../diem-swarm"}
-diem-time-service = { path = "../../common/time-service", features = ["testing"] }
+diem-time-service = { path = "../../crates/diem-time-service", features = ["testing"] }
 diem-vault-client = { path = "../../secure/storage/vault", features = ["fuzzing"] }
 diem-validator-interface = { path = "../../diem-move/diem-validator-interface" }
-diem-workspace-hack = { path = "../../common/workspace-hack" }
 diem-writeset-generator = { path = "../../diem-move/writeset-transaction-generator" }
 diem-transaction-builder = { path = "../../sdk/transaction-builder" }
 
 [[test]]
 name = "forge"
+harness = false
+
+[[test]]
+name = "forge-nft"
 harness = false

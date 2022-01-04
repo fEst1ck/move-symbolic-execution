@@ -1,5 +1,5 @@
 [package]
-name = "bytecode-interpreter"
+name = "move-stackless-bytecode-interpreter"
 version = "0.1.0"
 authors = ["Diem Association <opensource@diem.com>"]
 publish = false
@@ -8,9 +8,8 @@ license = "Apache-2.0"
 
 [dependencies]
 # diem dependencies
-bytecode = { path = "../bytecode" }
+move-stackless-bytecode = { path = "../bytecode" }
 bytecode-interpreter-crypto = { path = "crypto" }
-diem-workspace-hack = { path = "../../../common/workspace-hack" }
 move-binary-format = { path = "../../move-binary-format" }
 move-core-types = { path = "../../move-core/types" }
 move-model = { path = "../../move-model" }
@@ -25,6 +24,7 @@ serde = { version = "1.0.124", features = ["derive"] }
 structopt = "0.3.21"
 z3 = {version="0.11.2", features = ["static-link-z3"]}
 petgraph = "0.6.0"
+diem-workspace-hack = { version = "0.1", path = "../../../crates/diem-workspace-hack" }
 
 [dev-dependencies]
 datatest-stable = "0.1.1"

@@ -21,12 +21,12 @@ thiserror = "1.0.24"
 bcs = "0.1.2"
 diem-crypto = { path = "../../crates/diem-crypto" }
 diem-github-client = { path = "github" }
-diem-infallible = { path = "../../common/infallible" }
-diem-logger = { path = "../../common/logger" }
-diem-temppath = { path = "../../common/temppath" }
-diem-time-service = { path = "../../common/time-service" }
+diem-infallible = { path = "../../crates/diem-infallible" }
+diem-logger = { path = "../../crates/diem-logger" }
+diem-temppath = { path = "../../crates/diem-temppath" }
+diem-time-service = { path = "../../crates/diem-time-service" }
 diem-vault-client = { path = "vault" }
-diem-workspace-hack = { path = "../../common/workspace-hack" }
+diem-workspace-hack = { version = "0.1", path = "../../crates/diem-workspace-hack" }
 
 [dev-dependencies]
 diem-crypto = { path = "../../crates/diem-crypto", features = ["fuzzing"] }

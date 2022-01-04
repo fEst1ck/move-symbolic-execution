@@ -15,16 +15,12 @@ use once_cell::sync::OnceCell;
 use tempfile::TempDir;
 use walkdir::WalkDir;
 
-use move_command_line_common::{
-    env::{read_bool_env_var, read_env_var},
-    testing::EXP_EXT,
-};
+use move_command_line_common::{env::read_env_var, testing::EXP_EXT};
 use move_prover::{cli::Options, run_move_prover};
 use move_prover_test_utils::{baseline_test::verify_or_update_baseline, extract_test_directives};
 
 const ENV_FLAGS: &str = "MVP_TEST_FLAGS";
 const ENV_TEST_EXTENDED: &str = "MVP_TEST_X";
-const ENV_TEST_INCONSISTENCY: &str = "MVP_TEST_INCONSISTENCY";
 const ENV_TEST_FEATURE: &str = "MVP_TEST_FEATURE";
 const ENV_TEST_ON_CI: &str = "MVP_TEST_ON_CI";
 
@@ -79,26 +75,30 @@ fn get_features() -> &'static [Feature] {
                 runner: |p| test_runner_for_feature(p, get_feature_by_name("default")),
                 enabling_condition: |_, _| true,
             },
-            // Tests with pragma opaque ignored for internal functions
+            // Tests with spec simplification pipeline enabled
             Feature {
-                name: "no_opaque",
-                flags: &["--ignore-pragma-opaque-internal-only"],
+                name: "simplify",
+                flags: &[
+                    "--ignore-pragma-opaque-internal-only",
+                    "--simplify",
+                    "inline",
+                ],
                 inclusion_mode: InclusionMode::Implicit,
                 enable_in_ci: true,
                 only_if_requested: false,
                 separate_baseline: false,
-                runner: |p| test_runner_for_feature(p, get_feature_by_name("no_opaque")),
+                runner: |p| test_runner_for_feature(p, get_feature_by_name("simplify")),
                 enabling_condition: |_, _| true,
             },
-            // Tests with cvc4 as a backend for boogie.
+            // Tests with cvc5 as a backend for boogie.
             Feature {
-                name: "cvc4",
-                flags: &["--use-cvc4"],
+                name: "cvc5",
+                flags: &["--use-cvc5"],
                 inclusion_mode: InclusionMode::Implicit,
                 enable_in_ci: false, // Do not enable in CI until we have more data about stability
                 only_if_requested: false,
                 separate_baseline: false,
-                runner: |p| test_runner_for_feature(p, get_feature_by_name("cvc4")),
+                runner: |p| test_runner_for_feature(p, get_feature_by_name("cvc5")),
                 enabling_condition: |group, _| group == "unit",
             },
         ]
@@ -143,8 +143,8 @@ fn test_runner_for_feature(path: &Path, feature: &Feature) -> datatest_stable::R
     let mut options = Options::create_from_args(&args)?;
     options.setup_logging_for_test();
     let no_tools = read_env_var("BOOGIE_EXE").is_empty()
-        || !options.backend.use_cvc4 && read_env_var("Z3_EXE").is_empty()
-        || options.backend.use_cvc4 && read_env_var("CVC4_EXE").is_empty();
+        || !options.backend.use_cvc5 && read_env_var("Z3_EXE").is_empty()
+        || options.backend.use_cvc5 && read_env_var("CVC5_EXE").is_empty();
     let baseline_valid =
         !no_tools || !extract_test_directives(path, "// no-boogie-test")?.is_empty();
 
@@ -191,23 +191,10 @@ fn get_flags_and_baseline(
     // Determine the way how to configure tests based on directory of the path.
     let path_str = path.to_string_lossy();
 
-    let mut dep_flags = vec![
+    let dep_flags = vec![
         // stdlib is commonly required
         "--dependency=../move-stdlib/sources",
     ];
-    if path_str.contains("/move-stdlib/") {
-        // stdlib depends on nothing else
-    } else if path_str.contains("/diem-framework/core/") {
-        dep_flags.push("--dependency=../../diem-move/diem-framework/core/sources");
-    } else if path_str.contains("/diem-framework/DPN/") {
-        dep_flags.push("--dependency=../../diem-move/diem-framework/core/sources");
-        dep_flags.push("--dependency=../../diem-move/diem-framework/DPN/sources");
-    } else if path_str.contains("/diem-framework/experimental/") {
-        dep_flags.push("--dependency=../../diem-move/diem-framework/experimental/sources");
-    } else {
-        // unit tests also depends on diem-framework core
-        dep_flags.push("--dependency=../../diem-move/diem-framework/core/sources");
-    }
 
     let (base_flags, baseline_path) =
         if path_str.contains("diem-framework/") || path_str.contains("move-stdlib/") {
@@ -227,10 +214,8 @@ fn get_flags_and_baseline(
         };
     let mut flags = base_flags.iter().map(|s| (*s).to_string()).collect_vec();
 
-    // Add inconsistency checking flags
-    if read_bool_env_var(ENV_TEST_INCONSISTENCY) {
-        flags.push("--check-inconsistency".to_string());
-    }
+    // Add flag assigning an address to the stdlib.
+    flags.push("--named-addresses=Std=0x1".to_string());
 
     // Add flags specific to the feature.
     flags.extend(feature.flags.iter().map(|f| f.to_string()));
@@ -268,19 +253,7 @@ fn collect_enabled_tests(reqs: &mut Vec<Requirements>, group: &str, feature: &Fe
             continue;
         }
 
-        // TODO: this is to handle the awkwardness in the experimental folder in diem-framework
-        // where many symlinks are introduced. To be honest, both introducing symlinks (instead of
-        // using packages) and the hack here are bad designs. Hopefully this can be revisited soon.
         let path = entry.path();
-        if path
-            .symlink_metadata()
-            .expect("metadata")
-            .file_type()
-            .is_symlink()
-        {
-            continue;
-        }
-
         let mut included = match feature.inclusion_mode {
             InclusionMode::Implicit => !extract_test_directives(path, "// exclude_for: ")
                 .unwrap_or_default()
@@ -330,25 +303,6 @@ fn main() {
             collect_enabled_tests(&mut reqs, "extended", feature, "tests/xsources");
         } else {
             collect_enabled_tests(&mut reqs, "unit", feature, "tests/sources");
-            collect_enabled_tests(&mut reqs, "stdlib", feature, "../move-stdlib/sources");
-            collect_enabled_tests(
-                &mut reqs,
-                "diem_core",
-                feature,
-                "../../diem-move/diem-framework/core/sources",
-            );
-            collect_enabled_tests(
-                &mut reqs,
-                "diem_dpn",
-                feature,
-                "../../diem-move/diem-framework/DPN/sources",
-            );
-            // collect_enabled_tests(
-            //     &mut reqs,
-            //     "diem_exp",
-            //     feature,
-            //     "../../diem-move/diem-framework/experimental/sources",
-            // );
         }
     }
     datatest_stable::runner(&reqs);

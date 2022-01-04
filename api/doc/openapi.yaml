@@ -59,6 +59,27 @@ paths:
           description: Returns OpenAPI specification YAML document.
         "400":
           description: Bad Request
+  /accounts/{address}:
+    get:
+      summary: Get account
+      operationId: get_account
+      tags:
+        - accounts
+      parameters:
+        - $ref: '#/components/parameters/AccountAddress'
+      responses:
+        "200":
+          description: Returns the latest account core data resource.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Account'
+        "400":
+          $ref: '#/components/responses/400'
+        "404":
+          $ref: '#/components/responses/404'
+        "500":
+          $ref: '#/components/responses/500'
   /accounts/{address}/resources:
     get:
       summary: Get account resources
@@ -470,7 +491,11 @@ components:
       content:
         application/json:
           schema:
-            $ref: "#/components/schemas/Error"
+            allOf:
+              - $ref: "#/components/schemas/Error"
+              - example:
+                  code: 400
+                  message: "invalid parameter"
     "404":
       description: |
         Resource or data not found.
@@ -478,28 +503,45 @@ components:
       content:
         application/json:
           schema:
-            $ref: "#/components/schemas/Error"
+            allOf:
+              - $ref: "#/components/schemas/Error"
+              - example:
+                  code: 404
+                  message: "resource not found"
+                  diem_ledger_version: "37829327"
     "413":
       description: |
         The request payload is too large.
       content:
         application/json:
           schema:
-            $ref: "#/components/schemas/Error"
+            allOf:
+              - $ref: "#/components/schemas/Error"
+              - example:
+                  code: 413
+                  message: "The request payload is too large"
     "415":
       description: |
         The request's content-type is not supported.
       content:
         application/json:
           schema:
-            $ref: "#/components/schemas/Error"
+            allOf:
+              - $ref: "#/components/schemas/Error"
+              - example:
+                  code: 415
+                  message: "The request's content-type is not supported"
     "500":
       description: |
         Server internal error, caused by unexpected issues.
       content:
         application/json:
           schema:
-            $ref: "#/components/schemas/Error"
+            allOf:
+              - $ref: "#/components/schemas/Error"
+              - example:
+                  code: 500
+                  message: "unexpected internal error"
   schemas:
     Error:
       title: Response Error
@@ -603,6 +645,21 @@ components:
           $ref: '#/components/schemas/LedgerVersion'
         ledger_timestamp:
           $ref: '#/components/schemas/TimestampUsec'
+    Account:
+      title: Account
+      description: Core account resource, used for identifying account and transaction execution.
+      type: object
+      required:
+        - sequence_number
+        - authentication_key
+      properties:
+        sequence_number:
+          $ref: '#/components/schemas/Uint64'
+        authentication_key:
+          $ref: '#/components/schemas/HexEncodedBytes'
+      example:
+        sequence_number: "1"
+        authentication_key: "0x5307b5f4bc67829097a8ba9b43dba3b88261eeccd1f709d9bde240fc100fbb69"
     AccountResource:
       title: Account Resource
       description: Account resource is a Move struct value belongs to an account.
@@ -1004,6 +1061,7 @@ components:
         - gas_used
         - success
         - vm_status
+        - accumulator_root_hash
       properties:
         version:
           $ref: '#/components/schemas/Uint64'
@@ -1024,6 +1082,8 @@ components:
           type: string
           description: |
             Human readable transaction execution result message from Diem VM.
+        accumulator_root_hash:
+          $ref: '#/components/schemas/HexEncodedBytes'
     UserTransaction:
       title: User Transaction
       type: object
@@ -1031,6 +1091,7 @@ components:
         - required:
             - type
             - events
+            - timestamp
           properties:
             type:
               type: string
@@ -1039,6 +1100,8 @@ components:
               type: array
               items:
                 $ref: '#/components/schemas/Event'
+            timestamp:
+              $ref: '#/components/schemas/TimestampUsec'
         - $ref: '#/components/schemas/UserTransactionRequest'
         - $ref: '#/components/schemas/UserTransactionSignature'
         - $ref: '#/components/schemas/OnChainTransactionInfo'
@@ -1346,7 +1409,7 @@ components:
           * `vector<u64>{255, 255}` => `["255", "255"]`
           * `vector<u8>{255, 255}` => `0xffff`
 
-        Move `struct` type value is serialized into `object` that looks like this:
+        Move `struct` type value is serialized into `object` that looks like this (except some Move stdlib types, see the following section):
 
           ```json
           {
@@ -1358,6 +1421,10 @@ components:
 
         For example:
           `{ "created": "0xa550c18", "role_id": "0" }`
+
+        **Special serialization for Move stdlib types:**
+
+        * [0x1::ASCII::String](https://github.com/diem/diem/blob/main/language/move-stdlib/docs/ASCII.md) is serialized into `string`. For example, struct value `0x1::ASCII::String{bytes: b"hello world"}` is serialized as `"hello world"` in JSON.
 
       example: "3344000000"
     Event:

@@ -5,10 +5,7 @@ use crate::{FullNode, HealthCheckError, LocalVersion, Node, NodeExt, Validator, 
 use anyhow::{anyhow, Context, Result};
 use diem_config::config::NodeConfig;
 use diem_logger::{debug, warn};
-use diem_sdk::{
-    client::BlockingClient,
-    types::{account_address::AccountAddress, PeerId},
-};
+use diem_sdk::types::{account_address::AccountAddress, PeerId};
 use std::{
     env,
     fs::{self, OpenOptions},
@@ -88,6 +85,7 @@ impl LocalNode {
         let log_file = OpenOptions::new()
             .create(true)
             .write(true)
+            .append(true)
             .open(self.log_path())?;
 
         // Start node process
@@ -118,7 +116,7 @@ impl LocalNode {
     }
 
     pub fn port(&self) -> u16 {
-        self.config.json_rpc.address.port()
+        self.config.api.address.port()
     }
 
     pub fn debug_port(&self) -> u16 {
@@ -145,7 +143,7 @@ impl LocalNode {
         fs::read_to_string(self.log_path()).map_err(Into::into)
     }
 
-    pub fn health_check(&mut self) -> Result<(), HealthCheckError> {
+    pub async fn health_check(&mut self) -> Result<(), HealthCheckError> {
         debug!("Health check on node '{}'", self.name);
 
         if let Some(p) = &mut self.process {
@@ -171,16 +169,19 @@ impl LocalNode {
 
         self.debug_client()
             .get_node_metrics()
+            .await
             .map(|_| ())
-            .map_err(HealthCheckError::RpcFailure)?;
+            .map_err(HealthCheckError::Failure)?;
 
-        BlockingClient::new(self.json_rpc_endpoint())
-            .get_metadata()
+        self.rest_client()
+            .get_ledger_information()
+            .await
             .map(|_| ())
-            .map_err(|e| HealthCheckError::RpcFailure(e.into()))
+            .map_err(HealthCheckError::Failure)
     }
 }
 
+#[async_trait::async_trait]
 impl Node for LocalNode {
     fn peer_id(&self) -> PeerId {
         self.peer_id()
@@ -214,7 +215,7 @@ impl Node for LocalNode {
         self.config()
     }
 
-    fn start(&mut self) -> Result<()> {
+    async fn start(&mut self) -> Result<()> {
         self.start()
     }
 
@@ -227,8 +228,17 @@ impl Node for LocalNode {
         todo!()
     }
 
-    fn health_check(&mut self) -> Result<(), HealthCheckError> {
-        self.health_check()
+    async fn health_check(&mut self) -> Result<(), HealthCheckError> {
+        self.health_check().await
+    }
+
+    fn counter(&self, _counter: &str, _port: u64) -> Result<f64> {
+        todo!()
+    }
+
+    // local node does not need to expose metric end point
+    fn expose_metric(&self) -> Result<u64> {
+        Ok(0)
     }
 }
 

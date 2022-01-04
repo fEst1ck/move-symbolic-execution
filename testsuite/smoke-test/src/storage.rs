@@ -4,20 +4,17 @@
 use crate::{
     smoke_test_environment::new_local_swarm,
     test_utils::{
-        assert_balance, create_and_fund_account, diem_swarm_utils::insert_waypoint, transfer_coins,
+        assert_balance, create_and_fund_account, diem_swarm_utils::insert_waypoint,
+        transfer_and_reconfig, transfer_coins,
     },
     workspace_builder,
     workspace_builder::workspace_root,
 };
 use anyhow::{bail, Result};
 use backup_cli::metadata::view::BackupStorageState;
-use diem_sdk::{
-    client::BlockingClient, transaction_builder::TransactionFactory, types::LocalAccount,
-};
 use diem_temppath::TempPath;
 use diem_types::{transaction::Version, waypoint::Waypoint};
 use forge::{NodeExt, Swarm, SwarmExt};
-use rand::random;
 use std::{
     fs,
     path::Path,
@@ -25,36 +22,41 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[test]
-fn test_db_restore() {
+#[tokio::test]
+async fn test_db_restore() {
     // pre-build tools
     workspace_builder::get_bin("db-backup");
     workspace_builder::get_bin("db-restore");
     workspace_builder::get_bin("db-backup-verify");
 
-    let mut swarm = new_local_swarm(4);
+    let mut swarm = new_local_swarm(4).await;
     let validator_peer_ids = swarm.validators().map(|v| v.peer_id()).collect::<Vec<_>>();
     let client_1 = swarm
         .validator(validator_peer_ids[1])
         .unwrap()
-        .json_rpc_client();
+        .rest_client();
     let transaction_factory = swarm.chain_info().transaction_factory();
 
     // set up: two accounts, a lot of money
-    let mut account_0 = create_and_fund_account(&mut swarm, 1000000);
-    let account_1 = create_and_fund_account(&mut swarm, 1000000);
+    let mut account_0 = create_and_fund_account(&mut swarm, 1000000).await;
+    let account_1 = create_and_fund_account(&mut swarm, 1000000).await;
+    let mut expected_balance_0 = 999999;
+    let mut expected_balance_1 = 1000001;
+
     transfer_coins(
         &client_1,
         &transaction_factory,
         &mut account_0,
         &account_1,
         1,
-    );
+    )
+    .await;
 
-    let mut expected_balance_0 = 999999;
-    let mut expected_balance_1 = 1000001;
-    assert_balance(&client_1, &account_0, expected_balance_0);
-    assert_balance(&client_1, &account_1, expected_balance_1);
+    assert_balance(&client_1, &account_0, expected_balance_0).await;
+    assert_balance(&client_1, &account_1, expected_balance_1).await;
+
+    expected_balance_0 -= 20;
+    expected_balance_1 += 20;
 
     transfer_and_reconfig(
         &client_1,
@@ -64,11 +66,9 @@ fn test_db_restore() {
         &account_1,
         20,
     )
-    .unwrap();
-    expected_balance_0 -= 20;
-    expected_balance_1 += 20;
-    assert_balance(&client_1, &account_0, expected_balance_0);
-    assert_balance(&client_1, &account_1, expected_balance_1);
+    .await;
+    assert_balance(&client_1, &account_0, expected_balance_0).await;
+    assert_balance(&client_1, &account_1, expected_balance_1).await;
 
     // make a backup from node 1
     let node1_config = swarm.validator(validator_peer_ids[1]).unwrap().config();
@@ -98,21 +98,20 @@ fn test_db_restore() {
     // restore db from backup
     db_restore(backup_path.path(), db_dir.as_path(), &[]);
 
-    {
-        transfer_and_reconfig(
-            &client_1,
-            &transaction_factory,
-            swarm.chain_info().root_account,
-            &mut account_0,
-            &account_1,
-            20,
-        )
-        .unwrap();
-        expected_balance_0 -= 20;
-        expected_balance_1 += 20;
-        assert_balance(&client_1, &account_0, expected_balance_0);
-        assert_balance(&client_1, &account_1, expected_balance_1);
-    }
+    expected_balance_0 -= 20;
+    expected_balance_1 += 20;
+
+    transfer_and_reconfig(
+        &client_1,
+        &transaction_factory,
+        swarm.chain_info().root_account,
+        &mut account_0,
+        &account_1,
+        20,
+    )
+    .await;
+    assert_balance(&client_1, &account_0, expected_balance_0).await;
+    assert_balance(&client_1, &account_1, expected_balance_1).await;
 
     // start node 0 on top of restored db
     swarm
@@ -124,15 +123,18 @@ fn test_db_restore() {
         .validator_mut(node_to_restart)
         .unwrap()
         .wait_until_healthy(Instant::now() + Duration::from_secs(10))
+        .await
         .unwrap();
     // verify it's caught up
     swarm
         .wait_for_all_nodes_to_catchup(Instant::now() + Duration::from_secs(60))
+        .await
         .unwrap();
 
-    let client_0 = swarm.validator(node_to_restart).unwrap().json_rpc_client();
-    assert_balance(&client_0, &account_0, expected_balance_0);
-    assert_balance(&client_0, &account_1, expected_balance_1);
+    let client_0 = swarm.validator(node_to_restart).unwrap().rest_client();
+
+    assert_balance(&client_0, &account_0, expected_balance_0).await;
+    assert_balance(&client_0, &account_1, expected_balance_1).await;
 }
 
 fn db_backup_verify(backup_path: &Path, trusted_waypoints: &[Waypoint]) {
@@ -175,10 +177,14 @@ fn wait_for_backups(
     backup_path: &Path,
     trusted_waypoints: &[Waypoint],
 ) -> Result<()> {
-    for _ in 0..60 {
+    for i in 0..120 {
         // the verify should always succeed.
         db_backup_verify(backup_path, trusted_waypoints);
 
+        println!(
+            "{}th wait for the backup to reach epoch {}, version {}.",
+            i, target_epoch, target_version,
+        );
         let output = Command::new(bin_path)
             .current_dir(workspace_root())
             .args(&[
@@ -295,30 +301,4 @@ pub(crate) fn db_restore(backup_path: &Path, db_path: &Path, trusted_waypoints: 
         panic!("db-restore failed, output: {:?}", output);
     }
     println!("Backup restored in {} seconds.", now.elapsed().as_secs());
-}
-
-fn transfer_and_reconfig(
-    client: &BlockingClient,
-    transaction_factory: &TransactionFactory,
-    root_account: &mut LocalAccount,
-    account0: &mut LocalAccount,
-    account1: &LocalAccount,
-    transfers: usize,
-) -> Result<()> {
-    for _ in 0..transfers {
-        if random::<u16>() % 10 == 0 {
-            let current_version = client.get_metadata()?.into_inner().diem_version.unwrap();
-            let txn = root_account.sign_with_transaction_builder(
-                transaction_factory.update_diem_version(0, current_version + 1),
-            );
-            client.submit(&txn)?;
-            client.wait_for_signed_transaction(&txn, None, None)?;
-
-            println!("Changing diem version to {}", current_version + 1,);
-        }
-
-        transfer_coins(client, transaction_factory, account0, account1, 1);
-    }
-
-    Ok(())
 }

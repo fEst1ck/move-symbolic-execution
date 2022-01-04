@@ -3,8 +3,8 @@
 
 use crate::{Address, Bytecode};
 
-use anyhow::format_err;
-use diem_types::{event::EventKey, transaction::Module};
+use anyhow::{bail, format_err};
+use diem_types::{account_config::CORE_CODE_ADDRESS, event::EventKey, transaction::Module};
 use move_binary_format::{
     access::ModuleAccess,
     file_format::{
@@ -18,7 +18,7 @@ use move_core_types::{
     parser::{parse_struct_tag, parse_type_tag},
     transaction_argument::TransactionArgument,
 };
-use resource_viewer::{AnnotatedMoveStruct, AnnotatedMoveValue};
+use move_resource_viewer::{AnnotatedMoveStruct, AnnotatedMoveValue};
 
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize, Serializer};
 use std::{
@@ -48,7 +48,7 @@ impl TryFrom<AnnotatedMoveStruct> for MoveResource {
 }
 
 #[derive(Clone, Debug, PartialEq, Copy)]
-pub struct U64(u64);
+pub struct U64(pub u64);
 
 impl U64 {
     pub fn inner(&self) -> &u64 {
@@ -59,6 +59,18 @@ impl U64 {
 impl From<u64> for U64 {
     fn from(d: u64) -> Self {
         Self(d)
+    }
+}
+
+impl FromStr for U64 {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let data = s
+            .parse::<u64>()
+            .map_err(|e| format_err!("parse u64 string {:?} failed, caused by error: {}", s, e))?;
+
+        Ok(U64(data))
     }
 }
 
@@ -98,9 +110,7 @@ impl<'de> Deserialize<'de> for U64 {
         D: Deserializer<'de>,
     {
         let s = <String>::deserialize(deserializer)?;
-        let data = s.parse::<u64>().map_err(D::Error::custom)?;
-
-        Ok(U64(data))
+        s.parse().map_err(D::Error::custom)
     }
 }
 
@@ -162,17 +172,31 @@ impl FromStr for HexEncodedBytes {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> anyhow::Result<Self, anyhow::Error> {
-        if let Some(hex) = s.strip_prefix("0x") {
-            Ok(Self(hex::decode(&hex)?))
+        let hex_str = if let Some(hex) = s.strip_prefix("0x") {
+            hex
         } else {
-            Ok(Self(hex::decode(&s)?))
-        }
+            s
+        };
+        Ok(Self(hex::decode(hex_str).map_err(|e| {
+            format_err!(
+                "decode hex-encoded string({:?}) failed, caused by error: {}",
+                s,
+                e
+            )
+        })?))
+    }
+}
+
+impl fmt::Display for HexEncodedBytes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "0x{}", hex::encode(&self.0))?;
+        Ok(())
     }
 }
 
 impl Serialize for HexEncodedBytes {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        format!("0x{}", &hex::encode(&self.0)).serialize(serializer)
+        self.to_string().serialize(serializer)
     }
 }
 
@@ -245,11 +269,26 @@ pub enum MoveValue {
     Vector(Vec<MoveValue>),
     Bytes(HexEncodedBytes),
     Struct(MoveStructValue),
+    String(String),
 }
 
 impl MoveValue {
     pub fn json(&self) -> anyhow::Result<serde_json::Value> {
         Ok(serde_json::to_value(self)?)
+    }
+
+    pub fn is_ascii_string(st: &StructTag) -> bool {
+        st.address == CORE_CODE_ADDRESS
+            && st.name.to_string() == "String"
+            && st.module.to_string() == "ASCII"
+    }
+
+    pub fn convert_ascii_string(v: AnnotatedMoveStruct) -> anyhow::Result<MoveValue> {
+        if let Some((_, AnnotatedMoveValue::Bytes(bytes))) = v.value.into_iter().next() {
+            Ok(MoveValue::String(String::from_utf8(bytes)?))
+        } else {
+            bail!("expect ASCII::String, but failed to decode struct value");
+        }
     }
 }
 
@@ -269,7 +308,13 @@ impl TryFrom<AnnotatedMoveValue> for MoveValue {
                     .collect::<anyhow::Result<_>>()?,
             ),
             AnnotatedMoveValue::Bytes(v) => MoveValue::Bytes(HexEncodedBytes(v)),
-            AnnotatedMoveValue::Struct(v) => MoveValue::Struct(v.try_into()?),
+            AnnotatedMoveValue::Struct(v) => {
+                if MoveValue::is_ascii_string(&v.type_) {
+                    MoveValue::convert_ascii_string(v)?
+                } else {
+                    MoveValue::Struct(v.try_into()?)
+                }
+            }
         })
     }
 }
@@ -298,6 +343,7 @@ impl Serialize for MoveValue {
             MoveValue::Vector(v) => v.serialize(serializer),
             MoveValue::Bytes(v) => v.serialize(serializer),
             MoveValue::Struct(v) => v.serialize(serializer),
+            MoveValue::String(v) => v.serialize(serializer),
         }
     }
 }
@@ -406,6 +452,30 @@ pub enum MoveType {
     Reference { mutable: bool, to: Box<MoveType> },
 }
 
+impl MoveType {
+    // Returns corresponding JSON data type for the value of `MoveType`
+    pub fn json_type_name(&self) -> String {
+        match self {
+            MoveType::U8 => "integer".to_owned(),
+            MoveType::U64 => "string<u64>".to_owned(),
+            MoveType::U128 => "string<u128>".to_owned(),
+            MoveType::Signer | MoveType::Address => "string<address>".to_owned(),
+            MoveType::Bool => "boolean".to_owned(),
+            MoveType::Vector { items } => {
+                if matches!(**items, MoveType::U8) {
+                    "string<hex>".to_owned()
+                } else {
+                    format!("array<{}>", items.json_type_name())
+                }
+            }
+            MoveType::Struct(_) | MoveType::GenericTypeParam { index: _ } => {
+                "string<move_struct_tag_id>".to_owned()
+            }
+            MoveType::Reference { mutable: _, to } => to.json_type_name(),
+        }
+    }
+}
+
 impl fmt::Display for MoveType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -429,11 +499,15 @@ impl fmt::Display for MoveType {
     }
 }
 
+// Implementation is imperfect, only parses type tags,
+// can't parse generic type params and references.
 impl FromStr for MoveType {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(parse_type_tag(s)?.into())
+        Ok(parse_type_tag(s)
+            .map_err(|e| format_err!("parse Move type {:?} failed, caused by error: {}", s, e))?
+            .into())
     }
 }
 
@@ -443,12 +517,15 @@ impl Serialize for MoveType {
     }
 }
 
+// Implementation is imperfect, only parses type tags,
+// can't parse generic type params and references.
 impl<'de> Deserialize<'de> for MoveType {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let data = <String>::deserialize(deserializer)?;
+        let data = <String>::deserialize(deserializer)
+            .map_err(|e| D::Error::custom(format_err!("deserialize Move type failed, {}", e)))?;
         data.parse().map_err(D::Error::custom)
     }
 }
@@ -774,6 +851,9 @@ impl From<&AbilitySet> for MoveFunctionGenericTypeParam {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MoveModuleBytecode {
     pub bytecode: HexEncodedBytes,
+    // We don't need deserialize MoveModule as it should be serialized
+    // from `bytecode`.
+    #[serde(skip_deserializing)]
     pub abi: Option<MoveModule>,
 }
 
@@ -807,6 +887,9 @@ impl From<Module> for MoveModuleBytecode {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MoveScriptBytecode {
     pub bytecode: HexEncodedBytes,
+    // We don't need deserialize MoveModule as it should be serialized
+    // from `bytecode`.
+    #[serde(skip_deserializing)]
     pub abi: Option<MoveFunction>,
 }
 
@@ -853,7 +936,7 @@ impl FromStr for ScriptFunctionId {
 
 #[inline]
 fn invalid_script_function_id(s: &str) -> anyhow::Error {
-    format_err!("invalid script function id: {}", s)
+    format_err!("invalid script function id {:?}", s)
 }
 
 impl Serialize for ScriptFunctionId {
@@ -891,7 +974,7 @@ mod tests {
         identifier::Identifier,
         language_storage::{StructTag, TypeTag},
     };
-    use resource_viewer::{AnnotatedMoveStruct, AnnotatedMoveValue};
+    use move_resource_viewer::{AnnotatedMoveStruct, AnnotatedMoveValue};
 
     use serde::{de::DeserializeOwned, Serialize};
     use serde_json::{json, to_value, Value};
@@ -1079,11 +1162,11 @@ mod tests {
     #[test]
     fn test_parse_invalid_move_script_function_id_string() {
         assert_eq!(
-            "invalid script function id: 0x1",
+            "invalid script function id \"0x1\"",
             "0x1".parse::<ScriptFunctionId>().err().unwrap().to_string()
         );
         assert_eq!(
-            "invalid script function id: 0x1:",
+            "invalid script function id \"0x1:\"",
             "0x1:"
                 .parse::<ScriptFunctionId>()
                 .err()
@@ -1091,7 +1174,7 @@ mod tests {
                 .to_string()
         );
         assert_eq!(
-            "invalid script function id: 0x1:::",
+            "invalid script function id \"0x1:::\"",
             "0x1:::"
                 .parse::<ScriptFunctionId>()
                 .err()
@@ -1099,7 +1182,7 @@ mod tests {
                 .to_string()
         );
         assert_eq!(
-            "invalid script function id: 0x1::???",
+            "invalid script function id \"0x1::???\"",
             "0x1::???"
                 .parse::<ScriptFunctionId>()
                 .err()
@@ -1107,7 +1190,7 @@ mod tests {
                 .to_string()
         );
         assert_eq!(
-            "invalid script function id: Diem::Diem",
+            "invalid script function id \"Diem::Diem\"",
             "Diem::Diem"
                 .parse::<ScriptFunctionId>()
                 .err()
@@ -1115,7 +1198,7 @@ mod tests {
                 .to_string()
         );
         assert_eq!(
-            "invalid script function id: Diem::Diem::??",
+            "invalid script function id \"Diem::Diem::??\"",
             "Diem::Diem::??"
                 .parse::<ScriptFunctionId>()
                 .err()
@@ -1123,7 +1206,7 @@ mod tests {
                 .to_string()
         );
         assert_eq!(
-            "invalid script function id: 0x1::Diem::Diem::Diem",
+            "invalid script function id \"0x1::Diem::Diem::Diem\"",
             "0x1::Diem::Diem::Diem"
                 .parse::<ScriptFunctionId>()
                 .err()

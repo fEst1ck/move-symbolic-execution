@@ -2,16 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #![forbid(unsafe_code)]
-#![allow(dead_code)]
 
-mod data_notification;
-mod data_stream;
-mod error;
+pub mod data_notification;
+pub mod data_stream;
+pub mod error;
 mod logging;
 mod metrics;
 mod stream_engine;
-mod streaming_client;
-mod streaming_service;
+pub mod streaming_client;
+pub mod streaming_service;
 
 #[cfg(test)]
 mod tests;

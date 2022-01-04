@@ -20,10 +20,10 @@ diemdb = { path = "../../storage/diemdb", features = ["fuzzing"] }
 diem-config = { path = "../../config" }
 diem-crypto = { path = "../../crates/diem-crypto" }
 diem-genesis-tool = {path = "../../config/management/genesis", features = ["testing"] }
-diem-temppath = { path = "../../common/temppath" }
+diem-temppath = { path = "../../crates/diem-temppath" }
 diem-types = { path = "../../types", features = ["fuzzing"] }
 diem-vm = { path = "../../diem-move/diem-vm" }
-diem-workspace-hack = { path = "../../common/workspace-hack" }
+diem-workspace-hack = { version = "0.1", path = "../../crates/diem-workspace-hack" }
 storage-interface = { path = "../../storage/storage-interface" }
 storage-service = { path = "../../storage/storage-service" }
 diem-transaction-builder = { path = "../../sdk/transaction-builder" }

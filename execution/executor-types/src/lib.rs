@@ -4,6 +4,8 @@
 #![forbid(unsafe_code)]
 
 mod error;
+mod executed_chunk;
+
 pub use error::Error;
 
 use anyhow::Result;
@@ -15,6 +17,7 @@ use diem_crypto::{
     },
     HashValue,
 };
+use diem_state_view::StateViewId;
 use diem_types::{
     account_address::AccountAddress,
     account_state_blob::AccountStateBlob,
@@ -22,36 +25,34 @@ use diem_types::{
     epoch_state::EpochState,
     ledger_info::LedgerInfoWithSignatures,
     nibble::nibble_path::NibblePath,
-    on_chain_config,
     proof::{accumulator::InMemoryAccumulator, AccumulatorExtensionProof},
     transaction::{
-        default_protocol::{TransactionListWithProof, TransactionOutputListWithProof},
-        Transaction, TransactionInfo, TransactionOutput, TransactionStatus, TransactionToCommit,
-        Version,
+        Transaction, TransactionInfo, TransactionListWithProof, TransactionOutputListWithProof,
+        TransactionStatus, Version,
     },
     write_set::WriteSet,
 };
 use scratchpad::ProofRead;
 use serde::{Deserialize, Serialize};
 use std::{cmp::max, collections::HashMap, sync::Arc};
-use storage_interface::TreeState;
+use storage_interface::{DbReader, TreeState};
+
+pub use executed_chunk::ExecutedChunk;
+use storage_interface::state_view::VerifiedStateView;
 
 type SparseMerkleProof = diem_types::proof::SparseMerkleProof<AccountStateBlob>;
 type SparseMerkleTree = scratchpad::SparseMerkleTree<AccountStateBlob>;
 
-pub trait ChunkExecutor: Send + Sync {
+pub trait ChunkExecutorTrait: Send + Sync {
     /// Verifies the transactions based on the provided proofs and ledger info. If the transactions
     /// are valid, executes them and returns the executed result for commit.
     fn execute_chunk(
         &self,
         txn_list_with_proof: TransactionListWithProof,
         // Target LI that has been verified independently: the proofs are relative to this version.
-        verified_target_li: LedgerInfoWithSignatures,
-    ) -> Result<(
-        ProcessedVMOutput,
-        Vec<TransactionToCommit>,
-        Vec<ContractEvent>,
-    )>;
+        verified_target_li: &LedgerInfoWithSignatures,
+        epoch_change_li: Option<&LedgerInfoWithSignatures>,
+    ) -> Result<()>;
 
     /// Similar to `execute_chunk`, but instead of executing transactions, apply the transaction
     /// outputs directly to get the executed result.
@@ -59,75 +60,32 @@ pub trait ChunkExecutor: Send + Sync {
         &self,
         txn_output_list_with_proof: TransactionOutputListWithProof,
         // Target LI that has been verified independently: the proofs are relative to this version.
-        verified_target_li: LedgerInfoWithSignatures,
-    ) -> anyhow::Result<(
-        ProcessedVMOutput,
-        Vec<TransactionToCommit>,
-        Vec<ContractEvent>,
-    )>;
+        verified_target_li: &LedgerInfoWithSignatures,
+        epoch_change_li: Option<&LedgerInfoWithSignatures>,
+    ) -> anyhow::Result<()>;
 
-    /// Commit a previously executed chunks, returns a vector of reconfiguration events in the chunk.
-    fn commit_chunk(
-        &self,
-        verified_target_li: LedgerInfoWithSignatures,
-        // An optional end of epoch LedgerInfo. We do not allow chunks that end epoch without
-        // carrying any epoch change LI.
-        epoch_change_li: Option<LedgerInfoWithSignatures>,
-        output: ProcessedVMOutput,
-        txns_to_commit: Vec<TransactionToCommit>,
-        events: Vec<ContractEvent>,
-    ) -> anyhow::Result<Vec<ContractEvent>>;
-
-    fn execute_or_apply_chunk(
-        &self,
-        first_version: u64,
-        transactions: Vec<Transaction>,
-        transaction_outputs: Option<Vec<TransactionOutput>>,
-        transaction_infos: Vec<TransactionInfo>,
-    ) -> Result<(
-        ProcessedVMOutput,
-        Vec<TransactionToCommit>,
-        Vec<ContractEvent>,
-    )>;
+    /// Commit a previously executed chunk. Returns a vector of reconfiguration
+    /// events in the chunk and the transactions that were committed.
+    fn commit_chunk(&self) -> Result<(Vec<ContractEvent>, Vec<Transaction>)>;
 
     fn execute_and_commit_chunk(
         &self,
         txn_list_with_proof: TransactionListWithProof,
-        verified_target_li: LedgerInfoWithSignatures,
-        epoch_change_li: Option<LedgerInfoWithSignatures>,
-    ) -> Result<Vec<ContractEvent>> {
-        let (output, txns_to_commit, events) =
-            self.execute_chunk(txn_list_with_proof, verified_target_li.clone())?;
-        self.commit_chunk(
-            verified_target_li,
-            epoch_change_li,
-            output,
-            txns_to_commit,
-            events,
-        )
-    }
+        verified_target_li: &LedgerInfoWithSignatures,
+        epoch_change_li: Option<&LedgerInfoWithSignatures>,
+    ) -> Result<(Vec<ContractEvent>, Vec<Transaction>)>;
 
     fn apply_and_commit_chunk(
         &self,
         txn_output_list_with_proof: TransactionOutputListWithProof,
-        verified_target_li: LedgerInfoWithSignatures,
-        epoch_change_li: Option<LedgerInfoWithSignatures>,
-    ) -> Result<Vec<ContractEvent>> {
-        let (output, txns_to_commit, events) =
-            self.apply_chunk(txn_output_list_with_proof, verified_target_li.clone())?;
-        self.commit_chunk(
-            verified_target_li,
-            epoch_change_li,
-            output,
-            txns_to_commit,
-            events,
-        )
-    }
+        verified_target_li: &LedgerInfoWithSignatures,
+        epoch_change_li: Option<&LedgerInfoWithSignatures>,
+    ) -> Result<(Vec<ContractEvent>, Vec<Transaction>)>;
 }
 
-pub trait BlockExecutor: Send + Sync {
+pub trait BlockExecutorTrait: Send + Sync {
     /// Get the latest committed block id
-    fn committed_block_id(&self) -> Result<HashValue, Error>;
+    fn committed_block_id(&self) -> HashValue;
 
     /// Reset the internal state including cache with newly fetched latest committed block from storage.
     fn reset(&self) -> Result<(), Error>;
@@ -156,14 +114,13 @@ pub trait BlockExecutor: Send + Sync {
 }
 
 pub trait TransactionReplayer: Send {
-    fn replay_chunk(
+    fn replay(
         &self,
-        first_version: Version,
-        txns: Vec<Transaction>,
-        txn_infos: Vec<TransactionInfo>,
+        transactions: Vec<Transaction>,
+        transaction_infos: Vec<TransactionInfo>,
     ) -> Result<()>;
 
-    fn expecting_version(&self) -> Version;
+    fn commit(&self) -> Result<Arc<ExecutedChunk>>;
 }
 
 /// A structure that summarizes the result of the execution needed for consensus to agree on.
@@ -333,7 +290,7 @@ pub struct ExecutedTrees {
     /// tree is presenting the latest commited state, it will have a single Subtree node (or
     /// Empty node) whose hash equals the root hash of the newest Sparse Merkle Tree in
     /// storage.
-    state_tree: Arc<SparseMerkleTree>,
+    state_tree: SparseMerkleTree,
 
     /// The in-memory Merkle Accumulator representing a blockchain state consistent with the
     /// `state_tree`.
@@ -352,7 +309,7 @@ impl From<TreeState> for ExecutedTrees {
 
 impl ExecutedTrees {
     pub fn new_copy(
-        state_tree: Arc<SparseMerkleTree>,
+        state_tree: SparseMerkleTree,
         transaction_accumulator: Arc<InMemoryAccumulator<TransactionAccumulatorHasher>>,
     ) -> Self {
         Self {
@@ -361,7 +318,7 @@ impl ExecutedTrees {
         }
     }
 
-    pub fn state_tree(&self) -> &Arc<SparseMerkleTree> {
+    pub fn state_tree(&self) -> &SparseMerkleTree {
         &self.state_tree
     }
 
@@ -388,7 +345,7 @@ impl ExecutedTrees {
         num_leaves_in_accumulator: u64,
     ) -> ExecutedTrees {
         ExecutedTrees {
-            state_tree: Arc::new(SparseMerkleTree::new(state_root_hash)),
+            state_tree: SparseMerkleTree::new(state_root_hash),
             transaction_accumulator: Arc::new(
                 InMemoryAccumulator::new(frozen_subtrees_in_accumulator, num_leaves_in_accumulator)
                     .expect("The startup info read from storage should be valid."),
@@ -398,6 +355,31 @@ impl ExecutedTrees {
 
     pub fn new_empty() -> ExecutedTrees {
         Self::new(*SPARSE_MERKLE_PLACEHOLDER_HASH, vec![], 0)
+    }
+
+    pub fn is_same_view(&self, rhs: &Self) -> bool {
+        self.transaction_accumulator.root_hash() == rhs.transaction_accumulator.root_hash()
+    }
+
+    pub fn state_view(
+        &self,
+        persisted_view: &Self,
+        id: StateViewId,
+        reader: Arc<dyn DbReader>,
+    ) -> VerifiedStateView {
+        VerifiedStateView::new(
+            id,
+            reader.clone(),
+            persisted_view.version(),
+            persisted_view.state_tree.root_hash(),
+            self.state_tree.clone(),
+        )
+    }
+}
+
+impl Default for ExecutedTrees {
+    fn default() -> Self {
+        Self::new_empty()
     }
 }
 
@@ -512,102 +494,5 @@ impl TransactionData {
 
     pub fn txn_info_hash(&self) -> Option<HashValue> {
         self.txn_info_hash
-    }
-}
-
-/// The output of Processing the vm output of a series of transactions to the parent
-/// in-memory state merkle tree and accumulator.
-#[derive(Debug, Clone)]
-pub struct ProcessedVMOutput {
-    /// The entire set of data associated with each transaction.
-    transaction_data: Vec<TransactionData>,
-
-    /// The in-memory Merkle Accumulator and state Sparse Merkle Tree after appending all the
-    /// transactions in this set.
-    executed_trees: ExecutedTrees,
-
-    /// If set, this is the new epoch info that should be changed to if this block is committed.
-    epoch_state: Option<EpochState>,
-}
-
-impl ProcessedVMOutput {
-    pub fn new(
-        transaction_data: Vec<TransactionData>,
-        executed_trees: ExecutedTrees,
-        epoch_state: Option<EpochState>,
-    ) -> Self {
-        ProcessedVMOutput {
-            transaction_data,
-            executed_trees,
-            epoch_state,
-        }
-    }
-
-    pub fn transaction_data(&self) -> &[TransactionData] {
-        &self.transaction_data
-    }
-
-    pub fn executed_trees(&self) -> &ExecutedTrees {
-        &self.executed_trees
-    }
-
-    pub fn accu_root(&self) -> HashValue {
-        self.executed_trees().state_id()
-    }
-
-    pub fn version(&self) -> Option<Version> {
-        self.executed_trees().version()
-    }
-
-    pub fn epoch_state(&self) -> &Option<EpochState> {
-        &self.epoch_state
-    }
-
-    pub fn has_reconfiguration(&self) -> bool {
-        self.epoch_state.is_some()
-    }
-
-    pub fn compute_result(
-        &self,
-        parent_frozen_subtree_roots: Vec<HashValue>,
-        parent_num_leaves: u64,
-    ) -> StateComputeResult {
-        let new_epoch_event_key = on_chain_config::new_epoch_event_key();
-        let txn_accu = self.executed_trees().txn_accumulator();
-
-        let mut compute_status = Vec::new();
-        let mut transaction_info_hashes = Vec::new();
-        let mut reconfig_events = Vec::new();
-
-        for txn_data in self.transaction_data() {
-            let status = txn_data.status();
-            compute_status.push(status.clone());
-            if matches!(status, TransactionStatus::Keep(_)) {
-                transaction_info_hashes.push(txn_data.txn_info_hash().expect("Txn to be kept."));
-                reconfig_events.extend(
-                    txn_data
-                        .events()
-                        .iter()
-                        .filter(|e| *e.key() == new_epoch_event_key)
-                        .cloned(),
-                )
-            }
-        }
-
-        // Now that we have the root hash and execution status we can send the response to
-        // consensus.
-        // TODO: The VM will support a special transaction to set the validators for the
-        // next epoch that is part of a block execution.
-        StateComputeResult::new(
-            self.accu_root(),
-            txn_accu.frozen_subtree_roots().clone(),
-            txn_accu.num_leaves(),
-            parent_frozen_subtree_roots,
-            parent_num_leaves,
-            self.epoch_state.clone(),
-            compute_status,
-            transaction_info_hashes,
-            reconfig_events,
-        )
     }
 }

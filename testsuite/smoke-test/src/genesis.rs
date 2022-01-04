@@ -18,7 +18,6 @@ use diem_temppath::TempPath;
 use diem_transaction_builder::stdlib::encode_remove_validator_and_reconfigure_script;
 use diem_types::{
     account_config::diem_root_address,
-    epoch_change::EpochChangeProof,
     transaction::{Transaction, WriteSetPayload},
     waypoint::Waypoint,
 };
@@ -31,24 +30,23 @@ use std::{
     path::PathBuf,
     process::Command,
     str::FromStr,
-    thread::sleep,
     time::{Duration, Instant},
 };
 
-#[test]
+#[tokio::test]
 /// This test verifies the flow of a genesis transaction after the chain starts.
 /// 1. Test the consensus sync_only mode, every node should stop at the same version.
 /// 2. Test the db-bootstrapper applying a manual genesis transaction (remove validator 0) on diemdb directly
 /// 3. Test the nodes and clients resume working after updating waypoint
 /// 4. Test a node lagging behind can sync to the waypoint
-fn test_genesis_transaction_flow() {
+async fn test_genesis_transaction_flow() {
     // prebuild tools.
     let db_bootstrapper = workspace_builder::get_bin("db-bootstrapper");
     workspace_builder::get_bin("db-backup");
     workspace_builder::get_bin("db-restore");
     workspace_builder::get_bin("db-backup-verify");
 
-    let mut swarm = new_local_swarm(4);
+    let mut swarm = new_local_swarm(4).await;
     let chain_id = swarm.chain_id();
     let transaction_factory = swarm.chain_info().transaction_factory();
     let validator_peer_ids = swarm.validators().map(|v| v.peer_id()).collect::<Vec<_>>();
@@ -64,24 +62,27 @@ fn test_genesis_transaction_flow() {
         .validator_mut(node_to_kill)
         .unwrap()
         .restart()
+        .await
         .unwrap();
     swarm
         .validator_mut(node_to_kill)
         .unwrap()
         .wait_until_healthy(Instant::now() + Duration::from_secs(10))
+        .await
         .unwrap();
 
-    let mut account_0 = create_and_fund_account(&mut swarm, 10);
-    let account_1 = create_and_fund_account(&mut swarm, 10);
+    let mut account_0 = create_and_fund_account(&mut swarm, 10).await;
+    let account_1 = create_and_fund_account(&mut swarm, 10).await;
 
     println!("2. Set sync_only = true for all nodes and restart");
     for validator in swarm.validators_mut() {
         let mut node_config = validator.config().clone();
         node_config.consensus.sync_only = true;
         node_config.save(validator.config_path()).unwrap();
-        validator.restart().unwrap();
+        validator.restart().await.unwrap();
         validator
             .wait_until_healthy(Instant::now() + Duration::from_secs(10))
+            .await
             .unwrap();
     }
 
@@ -92,16 +93,19 @@ fn test_genesis_transaction_flow() {
         .validator_mut(node_to_kill)
         .unwrap()
         .restart()
+        .await
         .unwrap();
     swarm
         .validator_mut(node_to_kill)
         .unwrap()
         .wait_until_healthy(Instant::now() + Duration::from_secs(10))
+        .await
         .unwrap();
 
     println!("4. verify all nodes are at the same round and no progress being made in 5 sec");
     swarm
         .wait_for_all_nodes_to_catchup(Instant::now() + Duration::from_secs(60))
+        .await
         .unwrap();
 
     let mut known_round = None;
@@ -109,6 +113,7 @@ fn test_genesis_transaction_flow() {
         for validator in swarm.validators() {
             let round = validator
                 .get_metric("diem_consensus_current_round{}")
+                .await
                 .unwrap()
                 .unwrap();
             match known_round {
@@ -127,7 +132,7 @@ fn test_genesis_transaction_flow() {
             i,
             known_round.unwrap()
         );
-        sleep(Duration::from_secs(1));
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 
     println!("5. kill all nodes and prepare a genesis txn to remove validator 0");
@@ -186,6 +191,7 @@ fn test_genesis_transaction_flow() {
         validator.start().unwrap();
         validator
             .wait_until_healthy(Instant::now() + Duration::from_secs(10))
+            .await
             .unwrap();
     }
 
@@ -193,39 +199,40 @@ fn test_genesis_transaction_flow() {
     let client_0 = swarm
         .validator(validator_peer_ids[0])
         .unwrap()
-        .json_rpc_client();
+        .rest_client();
+
     transfer_coins(
         &client_0,
         &transaction_factory,
         &mut account_0,
         &account_1,
         1,
-    );
-    assert_balance(&client_0, &account_0, 9);
-    assert_balance(&client_0, &account_1, 11);
+    )
+    .await;
+    assert_balance(&client_0, &account_0, 9).await;
+    assert_balance(&client_0, &account_1, 11).await;
 
     // Create a new epoch to make things more complicated
     let txn = swarm
         .chain_info()
         .root_account
         .sign_with_transaction_builder(transaction_factory.update_diem_version(0, 12345));
-    client_0.submit(&txn).unwrap();
-    client_0
-        .wait_for_signed_transaction(&txn, None, None)
-        .unwrap();
+    client_0.submit_and_wait(&txn).await.unwrap();
 
     // Make full DB backup for later use. The backup crosses the new genesis.
-    let state_proof = client_0.get_state_proof(0).unwrap();
-    let version = state_proof.state().version;
-    let epoch_change_proof: EpochChangeProof =
-        bcs::from_bytes(state_proof.inner().epoch_change_proof.inner()).unwrap();
-
-    let epoch = epoch_change_proof
-        .ledger_info_with_sigs
-        .last()
+    let version = client_0
+        .get_ledger_information()
+        .await
         .unwrap()
-        .ledger_info()
-        .next_block_epoch();
+        .into_inner()
+        .version;
+    let epoch = client_0
+        .get_epoch_configuration()
+        .await
+        .unwrap()
+        .into_inner()
+        .next_block_epoch
+        .0;
     let backup_path = db_backup(
         swarm
             .validator(validator_peer_ids[0])
@@ -263,20 +270,24 @@ fn test_genesis_transaction_flow() {
         .validator_mut(node_to_kill)
         .unwrap()
         .restart()
+        .await
         .unwrap();
     swarm
         .validator_mut(node_to_kill)
         .unwrap()
         .wait_until_healthy(Instant::now() + Duration::from_secs(10))
+        .await
         .unwrap();
     swarm
         .wait_for_all_nodes_to_catchup(Instant::now() + Duration::from_secs(60))
+        .await
         .unwrap();
 
-    let client = swarm.validator(node_to_kill).unwrap().json_rpc_client();
-    transfer_coins(&client, &transaction_factory, &mut account_0, &account_1, 1);
-    assert_balance(&client_0, &account_0, 8);
-    assert_balance(&client_0, &account_1, 12);
+    let client = swarm.validator(node_to_kill).unwrap().rest_client();
+
+    transfer_coins(&client, &transaction_factory, &mut account_0, &account_1, 1).await;
+    assert_balance(&client_0, &account_0, 8).await;
+    assert_balance(&client_0, &account_1, 12).await;
 
     println!("10. nuke DB on node 0, and run db-restore, test if it rejoins the network okay.");
     swarm.validator_mut(node_to_kill).unwrap().stop();
@@ -289,19 +300,22 @@ fn test_genesis_transaction_flow() {
         .validator_mut(node_to_kill)
         .unwrap()
         .restart()
+        .await
         .unwrap();
     swarm
         .validator_mut(node_to_kill)
         .unwrap()
         .wait_until_healthy(Instant::now() + Duration::from_secs(10))
+        .await
         .unwrap();
     swarm
         .wait_for_all_nodes_to_catchup(Instant::now() + Duration::from_secs(60))
+        .await
         .unwrap();
 
-    transfer_coins(&client, &transaction_factory, &mut account_0, &account_1, 1);
-    assert_balance(&client_0, &account_0, 7);
-    assert_balance(&client_0, &account_1, 13);
+    transfer_coins(&client, &transaction_factory, &mut account_0, &account_1, 1).await;
+    assert_balance(&client_0, &account_0, 7).await;
+    assert_balance(&client_0, &account_1, 13).await;
 }
 
 fn parse_waypoint(db_bootstrapper_output: &str) -> Waypoint {

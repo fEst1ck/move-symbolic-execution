@@ -3,7 +3,7 @@
 
 use crate::{resolution::resolution_graph::ResolvedGraph, ModelConfig};
 use anyhow::Result;
-use move_lang::shared::NumericalAddress;
+use move_compiler::shared::NumericalAddress;
 use move_model::{model::GlobalEnv, options::ModelBuilderOptions, run_model_builder_with_options};
 
 #[derive(Debug, Clone)]
@@ -61,12 +61,17 @@ impl ModelBuilder {
             .map(|symbol| symbol.to_string())
             .collect::<Vec<String>>();
 
-        let (targets, deps) = if self.model_config.all_files_as_targets {
+        let (mut targets, mut deps) = if self.model_config.all_files_as_targets {
             targets.extend(deps.into_iter());
             (targets, vec![])
         } else {
             (targets, deps)
         };
+        if let Some(filter) = &self.model_config.target_filter {
+            // Filtering targets moves them into the deps
+            deps.extend(targets.iter().filter(|t| !t.contains(filter)).cloned());
+            targets = targets.into_iter().filter(|t| t.contains(filter)).collect();
+        }
 
         run_model_builder_with_options(
             &targets,
@@ -78,7 +83,7 @@ impl ModelBuilder {
                 .map(|(ident, addr)| {
                     let addr = NumericalAddress::new(
                         addr.into_bytes(),
-                        move_lang::shared::NumberFormat::Hex,
+                        move_compiler::shared::NumberFormat::Hex,
                     );
                     (ident.to_string(), addr)
                 })

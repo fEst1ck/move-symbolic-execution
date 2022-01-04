@@ -10,8 +10,8 @@ publish = false
 edition = "2018"
 
 [dependencies]
-diem-workspace-hack = { path = "../../common/workspace-hack" }
-resource-viewer = { path = "../../language/tools/resource-viewer" }
+diem-workspace-hack = { path = "../../crates/diem-workspace-hack" }
+move-resource-viewer = { path = "../../language/tools/move-resource-viewer" }
 diem-types = { path = "../../types"  }
 move-core-types = { path = "../../language/move-core/types" }
 move-binary-format = { path = "../../language/move-binary-format" }

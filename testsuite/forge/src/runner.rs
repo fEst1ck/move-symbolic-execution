@@ -10,6 +10,7 @@ use std::{
 };
 use structopt::{clap::arg_enum, StructOpt};
 use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
+use tokio::runtime::Runtime;
 // TODO going to remove random seed once cluster deployment supports re-run genesis
 use rand::rngs::OsRng;
 
@@ -71,7 +72,7 @@ impl Default for Format {
 }
 
 pub fn forge_main<F: Factory>(tests: ForgeConfig<'_>, factory: F, options: &Options) -> Result<()> {
-    let forge = Forge::new(options, tests, factory);
+    let forge = Forge::new(options, tests, factory, EmitJobRequest::default());
 
     if options.list {
         forge.list()?;
@@ -96,6 +97,7 @@ pub enum InitialVersion {
 
 pub struct ForgeConfig<'cfg> {
     public_usage_tests: &'cfg [&'cfg dyn PublicUsageTest],
+    nft_public_usage_tests: &'cfg [&'cfg dyn NFTPublicUsageTest],
     admin_tests: &'cfg [&'cfg dyn AdminTest],
     network_tests: &'cfg [&'cfg dyn NetworkTest],
 
@@ -106,7 +108,7 @@ pub struct ForgeConfig<'cfg> {
     initial_version: InitialVersion,
 
     /// The initial genesis modules to use when starting a network
-    genesis_modules: Option<Vec<Vec<u8>>>,
+    genesis_config: Option<GenesisConfig>,
 }
 
 impl<'cfg> ForgeConfig<'cfg> {
@@ -119,6 +121,14 @@ impl<'cfg> ForgeConfig<'cfg> {
         public_usage_tests: &'cfg [&'cfg dyn PublicUsageTest],
     ) -> Self {
         self.public_usage_tests = public_usage_tests;
+        self
+    }
+
+    pub fn with_nft_public_usage_tests(
+        mut self,
+        nft_public_usage_tests: &'cfg [&'cfg dyn NFTPublicUsageTest],
+    ) -> Self {
+        self.nft_public_usage_tests = nft_public_usage_tests;
         self
     }
 
@@ -142,8 +152,13 @@ impl<'cfg> ForgeConfig<'cfg> {
         self
     }
 
-    pub fn with_genesis_modules(mut self, genesis_modules: Vec<Vec<u8>>) -> Self {
-        self.genesis_modules = Some(genesis_modules);
+    pub fn with_genesis_modules_bytes(mut self, genesis_modules: Vec<Vec<u8>>) -> Self {
+        self.genesis_config = Some(GenesisConfig::Bytes(genesis_modules));
+        self
+    }
+
+    pub fn with_genesis_modules_path(mut self, genesis_modules: String) -> Self {
+        self.genesis_config = Some(GenesisConfig::Path(genesis_modules));
         self
     }
 
@@ -164,11 +179,12 @@ impl<'cfg> Default for ForgeConfig<'cfg> {
     fn default() -> Self {
         Self {
             public_usage_tests: &[],
+            nft_public_usage_tests: &[],
             admin_tests: &[],
             network_tests: &[],
             initial_validator_count: NonZeroUsize::new(1).unwrap(),
             initial_version: InitialVersion::Newest,
-            genesis_modules: None,
+            genesis_config: None,
         }
     }
 }
@@ -177,14 +193,21 @@ pub struct Forge<'cfg, F> {
     options: &'cfg Options,
     tests: ForgeConfig<'cfg>,
     factory: F,
+    global_job_request: EmitJobRequest,
 }
 
 impl<'cfg, F: Factory> Forge<'cfg, F> {
-    pub fn new(options: &'cfg Options, tests: ForgeConfig<'cfg>, factory: F) -> Self {
+    pub fn new(
+        options: &'cfg Options,
+        tests: ForgeConfig<'cfg>,
+        factory: F,
+        global_job_request: EmitJobRequest,
+    ) -> Self {
         Self {
             options,
             tests,
             factory,
+            global_job_request,
         }
     }
 
@@ -238,14 +261,15 @@ impl<'cfg, F: Factory> Forge<'cfg, F> {
             );
             let initial_version = self.initial_version();
             let genesis_version = self.genesis_version();
+            let runtime = Runtime::new().unwrap();
             let mut rng = ::rand::rngs::StdRng::from_seed(OsRng.gen());
-            let mut swarm = self.factory.launch_swarm(
+            let mut swarm = runtime.block_on(self.factory.launch_swarm(
                 &mut rng,
                 self.tests.initial_validator_count,
                 &initial_version,
                 &genesis_version,
-                self.tests.genesis_modules.as_deref(),
-            )?;
+                self.tests.genesis_config.as_ref(),
+            ))?;
 
             // Run PublicUsageTests
             for test in self.filter_tests(self.tests.public_usage_tests.iter()) {
@@ -256,6 +280,25 @@ impl<'cfg, F: Factory> Forge<'cfg, F> {
                 );
                 let result = run_test(|| test.run(&mut public_ctx));
                 summary.handle_result(test.name().to_owned(), result)?;
+            }
+
+            // Run NFTPublicUsageTests
+            if !self.tests.nft_public_usage_tests.is_empty() {
+                runtime.block_on(
+                    swarm
+                        .chain_info()
+                        .into_nft_public_info()
+                        .init_nft_environment(),
+                )?;
+                for test in self.filter_tests(self.tests.nft_public_usage_tests.iter()) {
+                    let mut nft_public_ctx = NFTPublicUsageContext::new(
+                        CoreContext::from_rng(&mut rng),
+                        swarm.chain_info().into_nft_public_info(),
+                        &mut report,
+                    );
+                    let result = run_test(|| runtime.block_on(test.run(&mut nft_public_ctx)));
+                    summary.handle_result(test.name().to_owned(), result)?;
+                }
             }
 
             // Run AdminTests
@@ -270,8 +313,12 @@ impl<'cfg, F: Factory> Forge<'cfg, F> {
             }
 
             for test in self.filter_tests(self.tests.network_tests.iter()) {
-                let mut network_ctx =
-                    NetworkContext::new(CoreContext::from_rng(&mut rng), &mut *swarm, &mut report);
+                let mut network_ctx = NetworkContext::new(
+                    CoreContext::from_rng(&mut rng),
+                    &mut *swarm,
+                    &mut report,
+                    self.global_job_request.clone(),
+                );
                 let result = run_test(|| test.run(&mut network_ctx));
                 summary.handle_result(test.name().to_owned(), result)?;
             }

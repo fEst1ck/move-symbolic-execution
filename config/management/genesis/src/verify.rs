@@ -10,10 +10,11 @@ use diem_management::{
     config::ConfigPath, error::Error, secure_backend::ValidatorBackend,
     storage::StorageWrapper as Storage,
 };
+use diem_network_address_encryption::Error as NetworkAddressError;
 use diem_temppath::TempPath;
 use diem_types::{
     account_address::AccountAddress, account_config, account_state::AccountState,
-    network_address::NetworkAddress, on_chain_config::ValidatorSet, protocol_spec::DpnProto,
+    network_address::NetworkAddress, on_chain_config::ValidatorSet,
     validator_config::ValidatorConfig, waypoint::Waypoint,
 };
 use diem_vm::DiemVM;
@@ -28,7 +29,7 @@ use std::{
     str::FromStr,
     sync::Arc,
 };
-use storage_interface::{default_protocol::DbReaderWriter, DbReader};
+use storage_interface::{DbReader, DbReaderWriter};
 use structopt::StructOpt;
 
 /// Prints the public information within a store
@@ -177,19 +178,17 @@ fn compare_genesis(
 
     let actual_validator_key = storage.x25519_public_from_private(VALIDATOR_NETWORK_KEY)?;
     let actual_fullnode_key = storage.x25519_public_from_private(FULLNODE_NETWORK_KEY)?;
-    let encryptor = storage.encryptor();
 
-    let expected_validator_key = encryptor
-        .decrypt(
-            &validator_config.validator_network_addresses,
-            validator_account,
-        )
-        .ok()
-        .and_then(|addrs| {
-            addrs
-                .get(0)
-                .and_then(|addr: &NetworkAddress| addr.find_noise_proto())
-        });
+    let network_addrs: Vec<NetworkAddress> =
+        bcs::from_bytes(&validator_config.validator_network_addresses)
+            .map_err(|e| {
+                NetworkAddressError::AddressDeserialization(validator_account, e.to_string())
+            })
+            .unwrap_or_default();
+
+    let expected_validator_key = network_addrs
+        .get(0)
+        .and_then(|addr: &NetworkAddress| addr.find_noise_proto());
     write_assert(
         buffer,
         VALIDATOR_NETWORK_KEY,
@@ -243,7 +242,7 @@ fn compute_genesis(
 /// Read from the ledger the validator config from the validator set for the specified account
 fn validator_config(
     validator_account: AccountAddress,
-    reader: Arc<dyn DbReader<DpnProto>>,
+    reader: Arc<dyn DbReader>,
 ) -> Result<ValidatorConfig, Error> {
     let blob = reader
         .get_latest_account_state(account_config::validator_set_address())

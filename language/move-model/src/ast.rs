@@ -27,7 +27,9 @@ use crate::{
 use internment::LocalIntern;
 use itertools::Itertools;
 use once_cell::sync::Lazy;
-use std::{borrow::Borrow, collections::HashSet, fmt::Debug, hash::Hash, ops::Deref};
+use std::{
+    borrow::Borrow, cell::RefCell, collections::HashSet, fmt::Debug, hash::Hash, ops::Deref,
+};
 
 // =================================================================================================
 /// # Declarations
@@ -54,6 +56,8 @@ pub struct SpecFunDecl {
     pub is_move_fun: bool,
     pub is_native: bool,
     pub body: Option<Exp>,
+    pub callees: BTreeSet<QualifiedId<SpecFunId>>,
+    pub is_recursive: RefCell<Option<bool>>,
 }
 
 // =================================================================================================
@@ -1032,7 +1036,7 @@ impl ModuleName {
     }
 
     pub fn from_address_bytes_and_name(
-        addr: move_lang::shared::NumericalAddress,
+        addr: move_compiler::shared::NumericalAddress,
         name: Symbol,
     ) -> ModuleName {
         ModuleName(BigUint::from_bytes_be(&addr.into_bytes()), name)
@@ -1054,7 +1058,7 @@ impl ModuleName {
         self.1
     }
 
-    /// Determine whether this is a script. The move-lang infrastructure uses MAX_ADDR
+    /// Determine whether this is a script. The move-compiler infrastructure uses MAX_ADDR
     /// for pseudo modules created from scripts, so use this address to check.
     pub fn is_script(&self) -> bool {
         static MAX_ADDR: Lazy<BigUint> = Lazy::new(|| {

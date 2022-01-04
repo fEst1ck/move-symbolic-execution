@@ -3,19 +3,18 @@
 
 use crate::{core_config::XCoreConfig, git::GitCli};
 use camino::{Utf8Path, Utf8PathBuf};
+use debug_ignore::DebugIgnore;
 use graph::PackageGraphPlus;
 use guppy::graph::PackageGraph;
-use hakari::{HakariBuilder, TomlOptions};
+use hakari::{HakariBuilder, HakariOutputOptions};
 use once_cell::sync::OnceCell;
 
 pub mod core_config;
-mod debug_ignore;
 mod errors;
 pub mod git;
 mod graph;
 mod workspace_subset;
 
-pub use debug_ignore::*;
 pub use errors::*;
 pub use workspace_subset::*;
 
@@ -121,15 +120,14 @@ impl XCoreContext {
         let graph = self.package_graph()?;
         self.config
             .hakari
+            .builder
             .to_hakari_builder(graph)
-            .map_err(|err| SystemError::guppy("while resolving Hakari config", err))
+            .map_err(|err| SystemError::guppy("resolving Hakari config", err))
     }
 
     /// Returns the default Hakari TOML options for this workspace.
-    pub fn hakari_toml_options(&self) -> TomlOptions {
-        let mut options = TomlOptions::new();
-        options.set_exact_versions(true);
-        options
+    pub fn hakari_output_options(&self) -> HakariOutputOptions {
+        self.config.hakari.output.to_options()
     }
 
     // ---

@@ -2,24 +2,28 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    diemnet::state::{ErrorType, PeerStates},
+    diemnet::{
+        logging::{LogEntry, LogEvent, LogSchema},
+        metrics::{increment_counter, start_timer},
+        state::{ErrorType, PeerStates},
+    },
     DiemDataClient, Error, GlobalDataSummary, Response, ResponseCallback, ResponseContext,
     ResponseError, ResponseId, Result,
 };
 use async_trait::async_trait;
-use diem_config::{config::StorageServiceConfig, network_id::PeerNetworkId};
+use diem_config::{
+    config::{DiemDataClientConfig, StorageServiceConfig},
+    network_id::PeerNetworkId,
+};
 use diem_id_generator::{IdGenerator, U64IdGenerator};
 use diem_infallible::RwLock;
-use diem_logger::trace;
+use diem_logger::prelude::*;
 use diem_time_service::{TimeService, TimeServiceTrait};
 use diem_types::{
     account_state_blob::AccountStatesChunkWithProof,
     epoch_change::EpochChangeProof,
     ledger_info::LedgerInfoWithSignatures,
-    transaction::{
-        default_protocol::{TransactionListWithProof, TransactionOutputListWithProof},
-        Version,
-    },
+    transaction::{TransactionListWithProof, TransactionOutputListWithProof, Version},
 };
 use futures::StreamExt;
 use network::{
@@ -35,16 +39,15 @@ use storage_service_types::{
     TransactionsWithProofRequest,
 };
 
+mod logging;
+mod metrics;
 mod state;
 #[cfg(test)]
 mod tests;
 
-// TODO(philiphayes): does this belong in a different crate? I feel like we're
-// accumulating a lot of tiny crates though...
-
-// TODO(philiphayes): configuration / pass as argument?
-const DEFAULT_TIMEOUT: Duration = Duration::from_millis(10_000);
-pub const DATA_SUMMARY_POLL_INTERVAL: Duration = Duration::from_millis(100);
+// Useful constants for the Diem Data Client
+const GLOBAL_DATA_LOG_FREQ_SECS: u64 = 5;
+const POLLER_ERROR_LOG_FREQ_SECS: u64 = 1;
 
 /// A [`DiemDataClient`] that fulfills requests from remote peers' Storage Service
 /// over DiemNet.
@@ -66,6 +69,8 @@ pub const DATA_SUMMARY_POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// and/or threads.
 #[derive(Clone, Debug)]
 pub struct DiemNetDataClient {
+    /// Config for DiemNet data client.
+    data_client_config: DiemDataClientConfig,
     /// The underlying DiemNet storage service client.
     network_client: StorageServiceClient,
     /// All of the data-client specific data we have on each network peer.
@@ -78,18 +83,23 @@ pub struct DiemNetDataClient {
 
 impl DiemNetDataClient {
     pub fn new(
-        config: StorageServiceConfig,
+        data_client_config: DiemDataClientConfig,
+        storage_service_config: StorageServiceConfig,
         time_service: TimeService,
         network_client: StorageServiceClient,
     ) -> (Self, DataSummaryPoller) {
         let client = Self {
+            data_client_config,
             network_client,
-            peer_states: Arc::new(RwLock::new(PeerStates::new(config))),
+            peer_states: Arc::new(RwLock::new(PeerStates::new(storage_service_config))),
             global_summary_cache: Arc::new(RwLock::new(GlobalDataSummary::empty())),
             response_id_generator: Arc::new(U64IdGenerator::new()),
         };
-        let poller =
-            DataSummaryPoller::new(time_service, client.clone(), DATA_SUMMARY_POLL_INTERVAL);
+        let poller = DataSummaryPoller::new(
+            time_service,
+            client.clone(),
+            Duration::from_millis(client.data_client_config.summary_poll_interval_ms),
+        );
         (client, poller)
     }
 
@@ -128,7 +138,7 @@ impl DiemNetDataClient {
 
         if all_connected.is_empty() {
             return Err(Error::DataIsUnavailable(
-                "no connected diemnet peers".to_owned(),
+                "No connected diemnet peers".to_owned(),
             ));
         }
 
@@ -143,7 +153,7 @@ impl DiemNetDataClient {
             .copied()
             .ok_or_else(|| {
                 Error::DataIsUnavailable(
-                    "no connected peers are advertising that they can serve this data range"
+                    "No connected peers are advertising that they can serve this data range"
                         .to_owned(),
                 )
             })
@@ -157,7 +167,16 @@ impl DiemNetDataClient {
         T: TryFrom<StorageServiceResponse, Error = E>,
         E: Into<Error>,
     {
-        let peer = self.choose_peer(&request)?;
+        let peer = self.choose_peer(&request).map_err(|error| {
+            error!(
+                (LogSchema::new(LogEntry::StorageServiceRequest)
+                    .event(LogEvent::PeerSelectionError)
+                    .message("Unable to select next peer")
+                    .error(&error))
+            );
+            error
+        })?;
+        let _timer = start_timer(&metrics::REQUEST_LATENCIES, request.get_label().into());
         self.send_request_to_peer_and_decode(peer, request).await
     }
 
@@ -193,13 +212,39 @@ impl DiemNetDataClient {
         request: StorageServiceRequest,
     ) -> Result<Response<StorageServiceResponse>, Error> {
         let id = self.next_response_id();
+
+        debug!(
+            (LogSchema::new(LogEntry::StorageServiceRequest)
+                .event(LogEvent::SendRequest)
+                .request_type(request.get_label())
+                .request_id(id)
+                .peer(&peer)
+                .request_data(&request))
+        );
+
+        increment_counter(&metrics::SENT_REQUESTS, request.get_label().into());
+
         let result = self
             .network_client
-            .send_request(peer, request.clone(), DEFAULT_TIMEOUT)
+            .send_request(
+                peer,
+                request.clone(),
+                Duration::from_millis(self.data_client_config.response_timeout_ms),
+            )
             .await;
 
         match result {
             Ok(response) => {
+                debug!(
+                    (LogSchema::new(LogEntry::StorageServiceResponse)
+                        .event(LogEvent::ResponseSuccess)
+                        .request_type(request.get_label())
+                        .request_id(id)
+                        .peer(&peer))
+                );
+
+                increment_counter(&metrics::SUCCESS_RESPONSES, request.get_label().into());
+
                 // For now, record all responses that at least pass the data
                 // client layer successfully. An alternative might also have the
                 // consumer notify both success and failure via the callback.
@@ -208,7 +253,7 @@ impl DiemNetDataClient {
                 // feels simpler for the consumer.
                 self.peer_states.write().update_score_success(peer);
 
-                // package up all of the context needed to fully report an error
+                // Package up all of the context needed to fully report an error
                 // with this RPC.
                 let response_callback = DiemNetResponseCallback {
                     data_client: self.clone(),
@@ -223,8 +268,8 @@ impl DiemNetDataClient {
                 Ok(Response::new(context, response))
             }
             Err(err) => {
-                // convert network error and storage service error types into
-                // data client errors. also categorize the error type for scoring
+                // Convert network error and storage service error types into
+                // data client errors. Also categorize the error type for scoring
                 // purposes.
                 let client_err = match err {
                     storage_service_client::Error::RpcError(err) => match err {
@@ -236,6 +281,17 @@ impl DiemNetDataClient {
                         Error::UnexpectedErrorEncountered(err.to_string())
                     }
                 };
+
+                error!(
+                    (LogSchema::new(LogEntry::StorageServiceResponse)
+                        .event(LogEvent::ResponseError)
+                        .request_type(request.get_label())
+                        .request_id(id)
+                        .peer(&peer)
+                        .error(&client_err))
+                );
+
+                increment_counter(&metrics::ERROR_RESPONSES, request.get_label().into());
 
                 self.notify_bad_response(id, peer, &request, ErrorType::NotUseful);
                 Err(client_err)
@@ -386,8 +442,10 @@ impl DataSummaryPoller {
     }
 
     pub async fn start(self) {
-        trace!("DataSummaryPoller: start");
-
+        info!(
+            (LogSchema::new(LogEntry::DataSummaryPollerStart)
+                .message("Starting the diem data poller!"))
+        );
         let ticker = self.time_service.interval(self.poll_interval);
         futures::pin_mut!(ticker);
 
@@ -397,21 +455,33 @@ impl DataSummaryPoller {
             // wait for next round to poll
             ticker.next().await;
 
-            trace!("DataSummaryPoller: polling next peer");
-
             // just sample a random peer for now. do something smarter here in
             // the future.
-            let maybe_peer = self
+            let peer = match self
                 .data_client
-                .choose_peer(&StorageServiceRequest::GetStorageServerSummary);
-
-            trace!("DataSummaryPoller: maybe polling peer: {:?}", maybe_peer);
-
-            let peer = match maybe_peer {
+                .choose_peer(&StorageServiceRequest::GetStorageServerSummary)
+            {
                 Ok(peer) => peer,
-                Err(_) => continue,
+                Err(error) => {
+                    sample!(
+                        SampleRate::Duration(Duration::from_secs(POLLER_ERROR_LOG_FREQ_SECS)),
+                        error!(
+                            (LogSchema::new(LogEntry::StorageSummaryRequest)
+                                .event(LogEvent::NoPeersToPoll)
+                                .message("Unable to select next peer")
+                                .error(&error))
+                        );
+                    );
+                    continue;
+                }
             };
 
+            let timer = start_timer(
+                &metrics::REQUEST_LATENCIES,
+                StorageServiceRequest::GetStorageServerSummary
+                    .get_label()
+                    .into(),
+            );
             let result: Result<StorageServerSummary> = self
                 .data_client
                 .send_request_to_peer_and_decode(
@@ -420,16 +490,36 @@ impl DataSummaryPoller {
                 )
                 .await
                 .map(Response::into_payload);
+            drop(timer);
 
-            trace!("DataSummaryPoller: maybe received response: {:?}", result);
-
-            let summary = match result {
-                Ok(summary) => summary,
-                Err(_err) => continue,
+            let storage_summary = match result {
+                Ok(storage_summary) => storage_summary,
+                Err(error) => {
+                    error!(
+                        (LogSchema::new(LogEntry::StorageSummaryResponse)
+                            .event(LogEvent::PeerPollingError)
+                            .message("Error encountered when polling peer")
+                            .error(&error)
+                            .peer(&peer))
+                    );
+                    continue;
+                }
             };
 
-            self.data_client.update_summary(peer, summary);
+            self.data_client.update_summary(peer, storage_summary);
             self.data_client.update_global_summary_cache();
+
+            sample!(
+                SampleRate::Duration(Duration::from_secs(GLOBAL_DATA_LOG_FREQ_SECS)),
+                debug!(
+                    (LogSchema::new(LogEntry::PeerStates)
+                        .event(LogEvent::AggregateSummary)
+                        .message(&format!(
+                            "Global data summary: {:?}",
+                            self.data_client.get_global_data_summary()
+                        )))
+                )
+            );
         }
     }
 }

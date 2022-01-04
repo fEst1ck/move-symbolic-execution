@@ -3,6 +3,7 @@
 
 use crate::{
     context::Context,
+    failpoint::fail_point,
     metrics::metrics,
     page::Page,
     param::{AddressParam, TransactionIdParam},
@@ -14,7 +15,7 @@ use diem_api_types::{
 };
 use diem_types::{
     mempool_status::MempoolStatusCode,
-    transaction::{RawTransaction, SignedTransaction, TransactionInfo},
+    transaction::{RawTransaction, SignedTransaction},
 };
 
 use anyhow::Result;
@@ -111,12 +112,14 @@ async fn handle_get_transaction(
     id: TransactionIdParam,
     context: Context,
 ) -> Result<impl Reply, Rejection> {
+    fail_point("endpoint_get_transaction")?;
     Ok(Transactions::new(context)?
         .get_transaction(id.parse("transaction hash or version")?)
         .await?)
 }
 
 async fn handle_get_transactions(page: Page, context: Context) -> Result<impl Reply, Rejection> {
+    fail_point("endpoint_get_transactions")?;
     Ok(Transactions::new(context)?.list(page)?)
 }
 
@@ -125,6 +128,7 @@ async fn handle_get_account_transactions(
     page: Page,
     context: Context,
 ) -> Result<impl Reply, Rejection> {
+    fail_point("endpoint_get_account_transactions")?;
     Ok(Transactions::new(context)?.list_by_account(address, page)?)
 }
 
@@ -132,6 +136,7 @@ async fn handle_submit_json_transactions(
     body: UserTransactionRequest,
     context: Context,
 ) -> Result<impl Reply, Rejection> {
+    fail_point("endpoint_submit_json_transactions")?;
     Ok(Transactions::new(context)?
         .create_from_request(body)
         .await?)
@@ -141,6 +146,7 @@ async fn handle_submit_bcs_transactions(
     body: bytes::Bytes,
     context: Context,
 ) -> Result<impl Reply, Rejection> {
+    fail_point("endpoint_submit_bcs_transactions")?;
     let txn = bcs::from_bytes(&body)
         .map_err(|err| Error::invalid_request_body(format!("deserialize error: {}", err)))?;
     Ok(Transactions::new(context)?.create(txn).await?)
@@ -150,6 +156,7 @@ async fn handle_create_signing_message(
     body: UserTransactionRequest,
     context: Context,
 ) -> Result<impl Reply, Rejection> {
+    fail_point("endpoint_create_signing_message")?;
     Ok(Transactions::new(context)?.signing_message(body)?)
 }
 
@@ -208,8 +215,13 @@ impl Transactions {
 
     pub fn list(self, page: Page) -> Result<impl Reply, Error> {
         let ledger_version = self.ledger_info.version();
-        let start_version = page.start(ledger_version, ledger_version)?;
         let limit = page.limit()?;
+        let last_page_start = if ledger_version > (limit as u64) {
+            ledger_version - (limit as u64)
+        } else {
+            0
+        };
+        let start_version = page.start(last_page_start, ledger_version)?;
 
         let data = self
             .context
@@ -228,14 +240,23 @@ impl Transactions {
         self.render_transactions(data)
     }
 
-    fn render_transactions(
-        self,
-        data: Vec<TransactionOnChainData<TransactionInfo>>,
-    ) -> Result<impl Reply, Error> {
+    fn render_transactions(self, data: Vec<TransactionOnChainData>) -> Result<impl Reply, Error> {
+        if data.is_empty() {
+            let txns: Vec<Transaction> = vec![];
+            return Response::new(self.ledger_info, &txns);
+        }
+        let first_version = data[0].version;
+        let mut timestamp = self.context.get_block_timestamp(first_version)?;
         let converter = self.context.move_converter();
         let txns: Vec<Transaction> = data
             .into_iter()
-            .map(|t| converter.try_into_onchain_transaction(t))
+            .map(|t| {
+                let txn = converter.try_into_onchain_transaction(timestamp, t)?;
+                // update timestamp, when txn is metadata block transaction
+                // new timestamp is used for the following transactions
+                timestamp = txn.timestamp();
+                Ok(txn)
+            })
             .collect::<Result<_>>()?;
         Response::new(self.ledger_info, &txns)
     }
@@ -248,9 +269,15 @@ impl Transactions {
         .ok_or_else(|| self.transaction_not_found(id))?;
 
         let converter = self.context.move_converter();
-        let ret = converter.try_into_transaction(txn_data)?;
+        let txn = match txn_data {
+            TransactionData::OnChain(txn) => {
+                let timestamp = self.context.get_block_timestamp(txn.version)?;
+                converter.try_into_onchain_transaction(timestamp, txn)?
+            }
+            TransactionData::Pending(txn) => converter.try_into_pending_transaction(*txn)?,
+        };
 
-        Response::new(self.ledger_info, &ret)
+        Response::new(self.ledger_info, &txn)
     }
 
     pub fn signing_message(self, txn: UserTransactionRequest) -> Result<impl Reply, Error> {
@@ -271,7 +298,7 @@ impl Transactions {
         Error::not_found("transaction", id, self.ledger_info.version())
     }
 
-    fn get_by_version(&self, version: u64) -> Result<Option<TransactionData<TransactionInfo>>> {
+    fn get_by_version(&self, version: u64) -> Result<Option<TransactionData>> {
         if version > self.ledger_info.version() {
             return Ok(None);
         }
@@ -286,10 +313,7 @@ impl Transactions {
     // because the period a transaction stay in the mempool is likely short.
     // Although the mempool get transation is async, but looking up txn in database is a sync call,
     // thus we keep it simple and call them in sequence.
-    async fn get_by_hash(
-        &self,
-        hash: diem_crypto::HashValue,
-    ) -> Result<Option<TransactionData<TransactionInfo>>> {
+    async fn get_by_hash(&self, hash: diem_crypto::HashValue) -> Result<Option<TransactionData>> {
         let from_db = self
             .context
             .get_transaction_by_hash(hash, self.ledger_info.version())?;

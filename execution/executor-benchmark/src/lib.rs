@@ -12,20 +12,19 @@ use crate::{
 };
 use diem_config::config::{NodeConfig, RocksdbConfig};
 use diem_logger::prelude::*;
-use diem_types::protocol_spec::DpnProto;
+
 use diem_vm::DiemVM;
 use diemdb::DiemDB;
-use executor::Executor;
+use executor::block_executor::BlockExecutor;
+use executor_types::BlockExecutorTrait;
 use std::{
     fs,
     path::Path,
     sync::{mpsc, Arc},
 };
-use storage_interface::{default_protocol::DbReaderWriter, DbReader};
+use storage_interface::{DbReader, DbReaderWriter};
 
-pub fn init_db_and_executor(
-    config: &NodeConfig,
-) -> (Arc<dyn DbReader<DpnProto>>, Executor<DpnProto, DiemVM>) {
+pub fn init_db_and_executor(config: &NodeConfig) -> (Arc<dyn DbReader>, BlockExecutor<DiemVM>) {
     let (db, dbrw) = DbReaderWriter::wrap(
         DiemDB::open(
             &config.storage.dir(),
@@ -37,7 +36,7 @@ pub fn init_db_and_executor(
         .expect("DB should open."),
     );
 
-    let executor = Executor::new(dbrw);
+    let executor = BlockExecutor::new(dbrw);
 
     (db, executor)
 }
@@ -76,7 +75,7 @@ pub fn run_benchmark(
     let executor_2 = executor_1.clone();
 
     let (block_sender, block_receiver) = mpsc::sync_channel(50 /* bound */);
-    let (commit_sender, commit_receiver) = mpsc::channel();
+    let (commit_sender, commit_receiver) = mpsc::sync_channel(3 /* bound */);
 
     let mut generator =
         TransactionGenerator::new_with_metafile(genesis_key, block_sender, source_dir);

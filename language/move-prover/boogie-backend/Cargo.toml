@@ -1,5 +1,5 @@
 [package]
-name = "boogie-backend"
+name = "move-prover-boogie-backend"
 version = "0.1.0"
 authors = ["Diem Association <opensource@diem.com>"]
 description = "Move prover Boogie backend"
@@ -9,11 +9,10 @@ edition = "2018"
 
 [dependencies]
 async-trait = "0.1.42"
-bytecode = { path = "../bytecode" }
+move-stackless-bytecode = { path = "../bytecode" }
 move-command-line-common = { path = "../../move-command-line-common" }
 move-model = { path = "../../move-model" }
 move-binary-format = { path = "../../move-binary-format" }
-diem-workspace-hack = { path = "../../../common/workspace-hack" }
 num = "0.4.0"
 itertools = "0.10.0"
 move-core-types = { path = "../../move-core/types" }
@@ -30,3 +29,4 @@ tera = "1.7.1"
 tokio = { version = "1.8.1", features = ["full"] }
 codespan = "0.11.1"
 codespan-reporting = "0.11.1"
+diem-workspace-hack = { version = "0.1", path = "../../../crates/diem-workspace-hack" }

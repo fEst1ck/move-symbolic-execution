@@ -5,8 +5,8 @@ use move_binary_format::{compatibility::Compatibility, normalized::Module, Compi
 use move_command_line_common::files::{
     extension_equals, find_filenames, MOVE_COMPILED_EXTENSION, MOVE_ERROR_DESC_EXTENSION,
 };
+use move_compiler::compiled_unit::{CompiledUnit, NamedCompiledModule};
 use move_core_types::language_storage::ModuleId;
-use move_lang::compiled_unit::{CompiledUnit, NamedCompiledModule};
 use move_package::{BuildConfig, ModelConfig};
 use std::{
     collections::BTreeMap,
@@ -133,7 +133,7 @@ fn generate_error_map(package_path: &Path, output_path: &Path, build_config: Bui
 
     recreate_dir(&errmap_path.parent().unwrap());
 
-    let errmap_options = errmapgen::ErrmapOptions {
+    let errmap_options = move_errmapgen::ErrmapOptions {
         output_file: errmap_path.to_string_lossy().to_string(),
         ..Default::default()
     };
@@ -142,12 +142,13 @@ fn generate_error_map(package_path: &Path, output_path: &Path, build_config: Bui
         .move_model_for_package(
             package_path,
             ModelConfig {
+                target_filter: None,
                 all_files_as_targets: true,
             },
         )
         .unwrap();
 
-    let mut emapgen = errmapgen::ErrmapGen::new(&model, &errmap_options);
+    let mut emapgen = move_errmapgen::ErrmapGen::new(&model, &errmap_options);
     emapgen.gen();
     emapgen.save_result();
 }

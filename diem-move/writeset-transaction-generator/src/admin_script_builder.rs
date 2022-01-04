@@ -9,8 +9,8 @@ use diem_types::{
     transaction::{Script, WriteSetPayload},
 };
 use handlebars::Handlebars;
+use move_compiler::{compiled_unit::AnnotatedCompiledUnit, Compiler, Flags};
 use move_core_types::transaction_argument::TransactionArgument;
-use move_lang::{compiled_unit::AnnotatedCompiledUnit, Compiler, Flags};
 use read_write_set::analyze;
 use serde::Serialize;
 use std::{collections::HashMap, io::Write, path::PathBuf};
@@ -139,6 +139,7 @@ pub fn encode_enable_parallel_execution_with_config() -> WriteSetPayload {
         analyze(diem_framework_releases::current_modules())
             .expect("Failed to get ReadWriteSet for current Diem Framework")
             .normalize_all_scripts(diem_vm::read_write_set_analysis::add_on_functions_list())
+            .trim()
             .into_inner(),
     ))
     .expect("Failed to serialize analyze result");

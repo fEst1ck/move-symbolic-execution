@@ -11,14 +11,14 @@ use crate::{
 use consensus_types::{block::Block, quorum_cert::QuorumCert};
 use diem_config::config::NodeConfig;
 use diem_crypto::{ed25519::Ed25519PrivateKey, Uniform};
-use diem_types::{protocol_spec::DpnProto, validator_signer::ValidatorSigner};
+use diem_types::validator_signer::ValidatorSigner;
 use execution_correctness::{ExecutionCorrectness, ExecutionCorrectnessManager};
 use executor_test_helpers::start_storage_service;
 use executor_types::ExecutedTrees;
 use std::sync::Arc;
 use storage_interface::DbReader;
 
-fn get_initial_data_and_qc(db: &dyn DbReader<DpnProto>) -> (RecoveryData, QuorumCert) {
+fn get_initial_data_and_qc(db: &dyn DbReader) -> (RecoveryData, QuorumCert) {
     // find the block corresponding to storage latest ledger info
     let startup_info = db
         .get_startup_info()
@@ -69,7 +69,8 @@ fn build_inserter(
     let state_computer = Arc::new(ExecutionProxy::new(
         lec_client,
         Arc::new(MockTransactionManager::new(None)),
-        Box::new(consensus_notifier),
+        Arc::new(consensus_notifier),
+        &tokio::runtime::Handle::current(),
     ));
 
     TreeInserter::new_with_store(

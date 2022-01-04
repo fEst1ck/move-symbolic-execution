@@ -9,18 +9,18 @@ use itertools::Itertools;
 #[allow(unused_imports)]
 use log::{debug, info, log, warn, Level};
 
-use bytecode::{
-    function_target::FunctionTarget,
-    function_target_pipeline::{FunctionTargetsHolder, VerificationFlavor},
-    mono_analysis,
-    stackless_bytecode::{BorrowEdge, BorrowNode, Bytecode, Constant, HavocKind, Operation},
-};
 use move_model::{
     code_writer::CodeWriter,
     emit, emitln,
     model::{GlobalEnv, StructEnv},
     pragmas::{ADDITION_OVERFLOW_UNCHECKED_PRAGMA, SEED_PRAGMA, TIMEOUT_PRAGMA},
     ty::{PrimitiveType, Type},
+};
+use move_stackless_bytecode::{
+    function_target::FunctionTarget,
+    function_target_pipeline::{FunctionTargetsHolder, VerificationFlavor},
+    mono_analysis,
+    stackless_bytecode::{BorrowEdge, BorrowNode, Bytecode, Constant, HavocKind, Operation},
 };
 
 use crate::{
@@ -35,15 +35,15 @@ use crate::{
     options::BoogieOptions,
     spec_translator::SpecTranslator,
 };
-use bytecode::{
-    function_target_pipeline::FunctionVariant,
-    stackless_bytecode::{AbortAction, PropKind},
-};
 use codespan::LineIndex;
 use move_model::{
     ast::{TempIndex, TraceKind},
     model::{Loc, NodeId},
     ty::{TypeDisplayContext, BOOL_TYPE},
+};
+use move_stackless_bytecode::{
+    function_target_pipeline::FunctionVariant,
+    stackless_bytecode::{AbortAction, PropKind},
 };
 
 pub struct BoogieTranslator<'env> {
@@ -121,16 +121,9 @@ impl<'env> BoogieTranslator<'env> {
 
         let mut translated_types = BTreeSet::new();
         let mut translated_funs = BTreeSet::new();
+        let mut verified_functions_count = 0;
+        info!("generating verification conditions");
         for module_env in self.env.get_modules() {
-            log!(
-                if !module_env.is_target() {
-                    Level::Debug
-                } else {
-                    Level::Info
-                },
-                "translating module {}",
-                module_env.get_name().display(module_env.symbol_pool())
-            );
             self.writer.set_location(&module_env.env.internal_loc());
 
             spec_translator.translate_spec_vars(&module_env, mono_info.as_ref());
@@ -164,6 +157,7 @@ impl<'env> BoogieTranslator<'env> {
                 }
                 for (variant, ref fun_target) in self.targets.get_targets(fun_env) {
                     if variant.is_verified() {
+                        verified_functions_count += 1;
                         // Always produce a verified functions with an empty instantiation such that
                         // there is at least one top-level entry points for a VC.
                         FunctionTranslator {
@@ -190,6 +184,7 @@ impl<'env> BoogieTranslator<'env> {
                                 continue;
                             }
 
+                            verified_functions_count += 1;
                             FunctionTranslator {
                                 parent: self,
                                 fun_target,
@@ -224,6 +219,7 @@ impl<'env> BoogieTranslator<'env> {
         }
         // Emit any finalization items required by spec translation.
         self.spec_translator.finalize();
+        info!("{} verification conditions", verified_functions_count);
     }
 }
 

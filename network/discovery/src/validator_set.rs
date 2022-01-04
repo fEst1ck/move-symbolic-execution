@@ -11,8 +11,7 @@ use diem_config::{
 };
 use diem_crypto::x25519;
 use diem_logger::prelude::*;
-use diem_network_address_encryption::{Encryptor, Error as EncryptorError};
-use diem_secure_storage::Storage;
+use diem_network_address_encryption::Error;
 use diem_types::on_chain_config::{OnChainConfigPayload, ValidatorSet};
 use event_notifications::ReconfigNotificationListener;
 use futures::Stream;
@@ -27,7 +26,6 @@ use std::{
 pub struct ValidatorSetStream {
     pub(crate) network_context: NetworkContext,
     expected_pubkey: x25519::PublicKey,
-    encryptor: Encryptor<Storage>,
     reconfig_events: ReconfigNotificationListener,
 }
 
@@ -35,13 +33,11 @@ impl ValidatorSetStream {
     pub(crate) fn new(
         network_context: NetworkContext,
         expected_pubkey: x25519::PublicKey,
-        encryptor: Encryptor<Storage>,
         reconfig_events: ReconfigNotificationListener,
     ) -> Self {
         Self {
             network_context,
             expected_pubkey,
-            encryptor,
             reconfig_events,
         }
     }
@@ -77,8 +73,7 @@ impl ValidatorSetStream {
             .get()
             .expect("failed to get ValidatorSet from payload");
 
-        let peer_set =
-            extract_validator_set_updates(self.network_context, &self.encryptor, node_set);
+        let peer_set = extract_validator_set_updates(self.network_context, node_set);
         // Ensure that the public key matches what's onchain for this peer
         self.find_key_mismatches(
             peer_set
@@ -113,7 +108,6 @@ impl Stream for ValidatorSetStream {
 /// Extracts a set of ConnectivityRequests from a ValidatorSet which are appropriate for a network with type role.
 fn extract_validator_set_updates(
     network_context: NetworkContext,
-    encryptor: &Encryptor<Storage>,
     node_set: ValidatorSet,
 ) -> PeerSet {
     let is_validator = network_context.network_id().is_validator_network();
@@ -126,14 +120,9 @@ fn extract_validator_set_updates(
             let config = info.into_config();
 
             let addrs = if is_validator {
-                let result = encryptor.decrypt(&config.validator_network_addresses, peer_id);
-                if let Err(EncryptorError::StorageError(_)) = result {
-                    panic!(
-                        "Unable to initialize validator network addresses: {:?}",
-                        result
-                    );
-                }
-                result.map_err(anyhow::Error::from)
+                bcs::from_bytes(&config.validator_network_addresses)
+                    .map_err(|e| Error::AddressDeserialization(peer_id, e.to_string()))
+                    .map_err(anyhow::Error::from)
             } else {
                 config
                     .fullnode_network_addresses()
@@ -206,7 +195,6 @@ mod tests {
             network_context,
             conn_mgr_reqs_tx,
             pubkey,
-            Encryptor::for_testing(),
             reconfig_listener,
         );
 
@@ -257,13 +245,16 @@ mod tests {
         let validator_address =
             NetworkAddress::mock().append_prod_protos(pubkey, HANDSHAKE_VERSION);
         let addresses = vec![validator_address];
-        let encryptor = Encryptor::for_testing();
-        let encrypted_addresses = encryptor.encrypt(&addresses, peer_id, 0).unwrap();
-        let encoded_addresses = bcs::to_bytes(&addresses).unwrap();
+        let validator_encoded_addresses = bcs::to_bytes(&addresses).unwrap();
+        let fullnode_encoded_addresses = bcs::to_bytes(&addresses).unwrap();
         let validator = ValidatorInfo::new(
             peer_id,
             0,
-            ValidatorConfig::new(consensus_pubkey, encrypted_addresses, encoded_addresses),
+            ValidatorConfig::new(
+                consensus_pubkey,
+                validator_encoded_addresses,
+                fullnode_encoded_addresses,
+            ),
         );
         let validator_set = ValidatorSet::new(vec![validator]);
         let mut configs = HashMap::new();

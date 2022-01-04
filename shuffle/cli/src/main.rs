@@ -2,34 +2,34 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    shared::{get_home_path, normalized_network_name, Home, NetworkHome},
+    shared::{get_home_path, normalized_network_name, Home, NetworkHome, LATEST_USERNAME},
     test::TestCommand,
 };
 use anyhow::{anyhow, Result};
 use diem_types::account_address::AccountAddress;
-use std::{fs, path::PathBuf};
+use std::path::PathBuf;
 use structopt::StructOpt;
 
-mod account;
-mod build;
-mod console;
-mod deploy;
-mod new;
-mod node;
-mod shared;
-mod test;
-mod transactions;
+use shuffle::{account, build, console, deploy, new, node, shared, test, transactions};
 
 #[tokio::main]
 pub async fn main() -> Result<()> {
-    let home = Home::new(get_home_path().as_path())?;
-    let subcommand = Subcommand::from_args();
-    match subcommand {
+    let command = Command::from_args();
+    let home = Home::new(normalize_home_path(command.home_path).as_path())?;
+    match command.subcommand {
         Subcommand::New { blockchain, path } => new::handle(&home, blockchain, path),
         Subcommand::Node { genesis } => node::handle(&home, genesis),
-        Subcommand::Build { project_path } => {
-            build::handle(&shared::normalized_project_path(project_path)?)
-        }
+        Subcommand::Build {
+            project_path,
+            network,
+            address,
+        } => build::handle(
+            &shared::normalized_project_path(project_path)?,
+            normalized_address(
+                home.new_network_home(normalized_network_name(network).as_str()),
+                address,
+            )?,
+        ),
         Subcommand::Deploy {
             project_path,
             network,
@@ -89,6 +89,15 @@ pub async fn main() -> Result<()> {
 }
 
 #[derive(Debug, StructOpt)]
+struct Command {
+    #[structopt(long, global = true)]
+    home_path: Option<PathBuf>,
+
+    #[structopt(subcommand)]
+    subcommand: Subcommand,
+}
+
+#[derive(Debug, StructOpt)]
 #[structopt(name = "shuffle", about = "CLI frontend for Shuffle toolset")]
 pub enum Subcommand {
     #[structopt(about = "Creates a new shuffle project for Move development")]
@@ -109,6 +118,16 @@ pub enum Subcommand {
     Build {
         #[structopt(short, long)]
         project_path: Option<PathBuf>,
+
+        #[structopt(short, long)]
+        network: Option<String>,
+
+        #[structopt(
+            short,
+            long,
+            help = "Network specific address to be used for publishing with Named Address Sender"
+        )]
+        address: Option<String>,
     },
     #[structopt(about = "Publishes the main move package using the account as publisher")]
     Deploy {
@@ -182,19 +201,11 @@ fn normalized_address(
                 input_address
             }
         }
-        None => get_latest_address(&network_home)?,
+        None => network_home.address_for(LATEST_USERNAME)?.to_hex_literal(),
     };
     Ok(AccountAddress::from_hex_literal(
         normalized_string.as_str(),
     )?)
-}
-
-fn get_latest_address(network_home: &NetworkHome) -> Result<String> {
-    network_home.check_account_path_exists()?;
-    Ok(AccountAddress::from_hex(fs::read_to_string(
-        network_home.get_latest_account_address_path(),
-    )?)?
-    .to_hex_literal())
 }
 
 fn normalized_key_path(
@@ -209,7 +220,7 @@ fn normalized_key_path(
                     "An account hasn't been created yet! Run shuffle account first"
                 ));
             }
-            Ok(PathBuf::from(network_home.get_latest_account_key_path()))
+            Ok(network_home.key_path_for(LATEST_USERNAME))
         }
     }
 }
@@ -219,5 +230,12 @@ fn unwrap_nested_boolean_option(option: Option<Option<bool>>) -> bool {
         Some(Some(val)) => val,
         Some(_val) => true,
         None => false,
+    }
+}
+
+fn normalize_home_path(home_path: Option<PathBuf>) -> PathBuf {
+    match home_path {
+        Some(path) => path,
+        None => get_home_path(),
     }
 }

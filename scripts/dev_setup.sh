@@ -25,8 +25,7 @@ KUBECTL_VERSION=1.18.6
 TERRAFORM_VERSION=0.12.26
 HELM_VERSION=3.2.4
 VAULT_VERSION=1.5.0
-Z3_VERSION=4.8.9
-CVC4_VERSION=aac53f51
+Z3_VERSION=4.8.13
 CVC5_VERSION=0.0.3
 DOTNET_VERSION=5.0
 BOOGIE_VERSION=2.9.6
@@ -44,7 +43,7 @@ function usage {
   echo "-p update ${HOME}/.profile"
   echo "-t install build tools"
   echo "-o install operations tooling as well: helm, terraform, hadolint, yamllint, vault, docker, kubectl, python3"
-  echo "-y installs or updates Move prover tools: z3, cvc4, cvc5, dotnet, boogie"
+  echo "-y installs or updates Move prover tools: z3, cvc5, dotnet, boogie"
   echo "-s installs or updates requirements to test code-generation for Move SDKs"
   echo "-a install tools for build and test api"
   echo "-v verbose mode"
@@ -90,11 +89,11 @@ function update_path_and_profile {
     add_to_profile "export DOTNET_ROOT=\"${DOTNET_ROOT}\""
     add_to_profile "export PATH=\"${DOTNET_ROOT}/tools:\$PATH\""
     add_to_profile "export Z3_EXE=\"${BIN_DIR}/z3\""
-    add_to_profile "export CVC4_EXE=\"${BIN_DIR}/cvc4\""
     add_to_profile "export CVC5_EXE=\"${BIN_DIR}/cvc5\""
     add_to_profile "export BOOGIE_EXE=\"${DOTNET_ROOT}/tools/boogie\""
   fi
   if [[ "$INSTALL_CODEGEN" == "true" ]] && [[ "$PACKAGE_MANAGER" == "apt-get" ]]; then
+    add_to_profile "export PATH=\$PATH:${INSTALL_DIR}swift/usr/bin"
     if [[ -n "${GOBIN}" ]]; then
       add_to_profile "export PATH=\$PATH:/usr/lib/golang/bin"
     else
@@ -480,9 +479,9 @@ function install_z3 {
      return
   fi
   if [[ "$(uname)" == "Linux" ]]; then
-    Z3_PKG="z3-$Z3_VERSION-x64-ubuntu-16.04"
+    Z3_PKG="z3-$Z3_VERSION-x64-glibc-2.28"
   elif [[ "$(uname)" == "Darwin" ]]; then
-    Z3_PKG="z3-$Z3_VERSION-x64-osx-10.14.6"
+    Z3_PKG="z3-$Z3_VERSION-x64-osx-10.16"
   else
     echo "Z3 support not configured for this platform (uname=$(uname))"
     return
@@ -492,42 +491,10 @@ function install_z3 {
   mkdir -p "$TMPFILE"/
   (
     cd "$TMPFILE" || exit
-    curl -LOs "https://github.com/Z3Prover/z3/releases/download/z3-$Z3_VERSION/$Z3_PKG.zip"
+    curl -LOs "https://github.com/junkil-park/z3/releases/download/z3-$Z3_VERSION/$Z3_PKG.zip"
     unzip -q "$Z3_PKG.zip"
     cp "$Z3_PKG/bin/z3" "${INSTALL_DIR}"
     chmod +x "${INSTALL_DIR}z3"
-  )
-  rm -rf "$TMPFILE"
-}
-
-function install_cvc4 {
-  echo "Installing CVC4"
-  if command -v /usr/local/bin/cvc4 &>/dev/null; then
-    echo "cvc4 already exists at /usr/local/bin/cvc4"
-    echo "but this install will go to $${INSTALL_DIR}cvc4."
-    echo "you may want to remove the shared instance to avoid version confusion"
-  fi
-  if command -v "${INSTALL_DIR}cvc4" &>/dev/null && [[ "$("${INSTALL_DIR}cvc4" --version || true)" =~ .*${CVC4_VERSION}.* ]]; then
-     echo "CVC4 ${CVC4_VERSION} already installed"
-     return
-  fi
-  if [[ "$(uname)" == "Linux" ]]; then
-    CVC4_PKG="cvc4-$CVC4_VERSION-x64-ubuntu"
-  elif [[ "$(uname)" == "Darwin" ]]; then
-    CVC4_PKG="cvc4-$CVC4_VERSION-x64-osx"
-  else
-    echo "CVC4 support not configured for this platform (uname=$(uname))"
-    return
-  fi
-  TMPFILE=$(mktemp)
-  rm "$TMPFILE"
-  mkdir -p "$TMPFILE"/
-  (
-    cd "$TMPFILE" || exit
-    curl -LOs "https://cvc4.cs.stanford.edu/downloads/builds/minireleases/$CVC4_PKG.zip"
-    unzip -q "$CVC4_PKG.zip"
-    cp "$CVC4_PKG/cvc4" "${INSTALL_DIR}"
-    chmod +x "${INSTALL_DIR}cvc4"
   )
   rm -rf "$TMPFILE"
 }
@@ -588,6 +555,20 @@ function install_deno {
   curl -fsSL https://deno.land/x/install/install.sh | sh
   cp "${HOME}/.deno/bin/deno" "${INSTALL_DIR}"
   chmod +x "${INSTALL_DIR}deno"
+}
+
+function install_swift {
+    echo Installing Swift.
+    install_pkg wget "$PACKAGE_MANAGER"
+    install_pkg libncurses5 "$PACKAGE_MANAGER"
+    install_pkg clang "$PACKAGE_MANAGER"
+    install_pkg libcurl4 "$PACKAGE_MANAGER"
+    install_pkg libpython2.7 "$PACKAGE_MANAGER"
+    install_pkg libpython2.7-dev "$PACKAGE_MANAGER"
+    wget -q https://swift.org/builds/swift-5.3.3-release/ubuntu1804/swift-5.3.3-RELEASE/swift-5.3.3-RELEASE-ubuntu18.04.tar.gz
+    tar xzf swift-5.3.3-RELEASE-ubuntu18.04.tar.gz
+    rm -rf swift-5.3.3-RELEASE-ubuntu18.04.tar.gz
+    mv swift-5.3.3-RELEASE-ubuntu18.04 "${INSTALL_DIR}swift"
 }
 
 function install_java {
@@ -692,7 +673,6 @@ EOF
 cat <<EOF
 Move prover tools (since -y was provided):
   * z3
-  * cvc4
   * cvc5
   * dotnet
   * boogie
@@ -707,6 +687,7 @@ Codegen tools (since -s was provided):
   * Golang
   * Java
   * Deno
+  * Swift
 EOF
   fi
 
@@ -935,7 +916,6 @@ if [[ "$INSTALL_PROVER" == "true" ]]; then
     mkdir -p "$DOTNET_INSTALL_DIR" || true
   fi
   install_z3
-  install_cvc4
   install_cvc5
   install_dotnet
   install_boogie
@@ -948,6 +928,13 @@ if [[ "$INSTALL_CODEGEN" == "true" ]]; then
   install_deno
   install_java
   install_golang
+  if [[ "$PACKAGE_MANAGER" == "apt-get" ]]; then
+    # Only looked at this for a little while, but depends on glibc so alpine
+    # support isn't easily added. On Mac it requires XCode to be installed,
+    # which is quite largs, so probably something we don't want to download in
+    # this script.
+    install_swift
+  fi
   if [[ "$PACKAGE_MANAGER" != "apk" ]]; then
     # depends on wheels which needs glibc which doesn't work on alpine's python.
     # Only invested a hour or so in this, a work around may exist.

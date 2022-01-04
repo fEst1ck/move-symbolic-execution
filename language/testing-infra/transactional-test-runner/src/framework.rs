@@ -4,15 +4,25 @@
 #![forbid(unsafe_code)]
 
 use crate::tasks::{
-    taskify, InitCommand, PublishCommand, RawAddress, RunCommand, SyntaxChoice, TaskCommand,
-    TaskInput, ViewCommand,
+    taskify, Argument, InitCommand, PrintBytecodeCommand, PrintBytecodeInputChoice, PublishCommand,
+    RawAddress, RunCommand, SyntaxChoice, TaskCommand, TaskInput, ViewCommand,
 };
-use anyhow::*;
-use move_binary_format::file_format::{CompiledModule, CompiledScript};
+use anyhow::{anyhow, Result};
+use move_binary_format::{
+    binary_views::BinaryIndexedView,
+    file_format::{CompiledModule, CompiledScript},
+};
+use move_bytecode_source_map::mapping::SourceMapping;
 use move_command_line_common::{
     env::read_bool_env_var,
     files::{MOVE_EXTENSION, MOVE_IR_EXTENSION},
     testing::{format_diff, read_env_update_baseline, EXP_EXT},
+};
+use move_compiler::{
+    compiled_unit::AnnotatedCompiledUnit,
+    diagnostics::{Diagnostics, FilesSourceText},
+    shared::NumericalAddress,
+    FullyCompiledProgram,
 };
 use move_core_types::{
     account_address::AccountAddress,
@@ -20,13 +30,10 @@ use move_core_types::{
     language_storage::{ModuleId, TypeTag},
     transaction_argument::TransactionArgument,
 };
-use move_lang::{
-    compiled_unit::AnnotatedCompiledUnit,
-    diagnostics::{Diagnostics, FilesSourceText},
-    shared::NumericalAddress,
-    FullyCompiledProgram,
-};
+use move_disassembler::disassembler::{Disassembler, DisassemblerOptions};
+use move_ir_types::location::Spanned;
 use move_symbol_pool::Symbol;
+use rayon::iter::Either;
 use std::{
     collections::{BTreeMap, VecDeque},
     fmt::Debug,
@@ -62,6 +69,28 @@ impl<'a> CompiledState<'a> {
             RawAddress::Anonymous(addr) => *addr,
         }
     }
+
+    pub fn resolve_args(&self, args: Vec<Argument>) -> Vec<TransactionArgument> {
+        args.into_iter()
+            .map(|arg| match arg {
+                Argument::NamedAddress(named_addr) => {
+                    TransactionArgument::Address(self.resolve_named_address(named_addr.as_str()))
+                }
+                Argument::TransactionArgument(arg) => arg,
+            })
+            .collect()
+    }
+}
+
+fn merge_output(left: Option<String>, right: Option<String>) -> Option<String> {
+    match (left, right) {
+        (None, right) => right,
+        (left, None) => left,
+        (Some(mut left), Some(right)) => {
+            left.push_str(&right);
+            Some(left)
+        }
+    }
 }
 
 pub trait MoveTestAdapter<'a> {
@@ -92,7 +121,7 @@ pub trait MoveTestAdapter<'a> {
         args: Vec<TransactionArgument>,
         gas_budget: Option<u64>,
         extra: Self::ExtraRunArgs,
-    ) -> Result<()>;
+    ) -> Result<Option<String>>;
     fn call_function(
         &mut self,
         module: &ModuleId,
@@ -102,7 +131,7 @@ pub trait MoveTestAdapter<'a> {
         args: Vec<TransactionArgument>,
         gas_budget: Option<u64>,
         extra: Self::ExtraRunArgs,
-    ) -> Result<()>;
+    ) -> Result<Option<String>>;
     fn view_data(
         &mut self,
         address: AccountAddress,
@@ -139,6 +168,35 @@ pub trait MoveTestAdapter<'a> {
         match command {
             TaskCommand::Init { .. } => {
                 panic!("The 'init' command is optional. But if used, it must be the first command")
+            }
+            TaskCommand::PrintBytecode(PrintBytecodeCommand { input }) => {
+                let state = self.compiled_state();
+                let data = match data {
+                    Some(f) => f,
+                    None => panic!(
+                        "Expected a Move IR module text block following 'print-bytecode' starting on lines {}-{}",
+                        start_line, command_lines_stop
+                    ),
+                };
+                let data_path = data.path().to_str().unwrap();
+                let compiled = match input {
+                    PrintBytecodeInputChoice::Script => {
+                        Either::Left(compile_ir_script(state.dep_modules(), data_path)?)
+                    }
+                    PrintBytecodeInputChoice::Module => {
+                        Either::Right(compile_ir_module(state.dep_modules(), data_path)?)
+                    }
+                };
+                let source_mapping = SourceMapping::new_from_view(
+                    match &compiled {
+                        Either::Left(script) => BinaryIndexedView::Script(script),
+                        Either::Right(module) => BinaryIndexedView::Module(module),
+                    },
+                    Spanned::unsafe_no_loc(()).loc,
+                )
+                .expect("Unable to build dummy source mapping");
+                let disassembler = Disassembler::new(source_mapping, DisassemblerOptions::new());
+                Ok(Some(disassembler.disassemble()?))
             }
             TaskCommand::Publish(PublishCommand { gas_budget, syntax }, extra_args) => {
                 let syntax = syntax.unwrap_or_else(|| self.default_syntax());
@@ -223,8 +281,10 @@ pub trait MoveTestAdapter<'a> {
                     }
                     SyntaxChoice::IR => (compile_ir_script(state.dep_modules(), data_path)?, None),
                 };
-                self.execute_script(script, type_args, signers, args, gas_budget, extra_args)?;
-                Ok(warning_opt)
+                let args = self.compiled_state().resolve_args(args);
+                let output =
+                    self.execute_script(script, type_args, signers, args, gas_budget, extra_args)?;
+                Ok(merge_output(warning_opt, output))
             }
             TaskCommand::Run(
                 RunCommand {
@@ -241,7 +301,8 @@ pub trait MoveTestAdapter<'a> {
                     syntax.is_none(),
                     "syntax flag meaningless with function execution"
                 );
-                self.call_function(
+                let args = self.compiled_state().resolve_args(args);
+                let output = self.call_function(
                     &module,
                     name.as_ident_str(),
                     type_args,
@@ -250,7 +311,7 @@ pub trait MoveTestAdapter<'a> {
                     gas_budget,
                     extra_args,
                 )?;
-                Ok(None)
+                Ok(output)
             }
             TaskCommand::View(ViewCommand {
                 address,
@@ -318,7 +379,7 @@ impl<'a> CompiledState<'a> {
         {
             let file = NamedTempFile::new().unwrap();
             let path = file.path().to_str().unwrap().to_owned();
-            let (_id, interface_text) = move_lang::interface_generator::write_module_to_string(
+            let (_id, interface_text) = move_compiler::interface_generator::write_module_to_string(
                 &self.compiled_module_named_address_mapping,
                 &pmod.module,
             )
@@ -362,15 +423,15 @@ fn compile_source_unit(
         }
 
         let error_buffer = if read_bool_env_var(move_command_line_common::testing::PRETTY) {
-            move_lang::diagnostics::report_diagnostics_to_color_buffer(files, diags)
+            move_compiler::diagnostics::report_diagnostics_to_color_buffer(files, diags)
         } else {
-            move_lang::diagnostics::report_diagnostics_to_buffer(files, diags)
+            move_compiler::diagnostics::report_diagnostics_to_buffer(files, diags)
         };
         Some(String::from_utf8(error_buffer).unwrap())
     }
 
-    use move_lang::PASS_COMPILATION;
-    let (mut files, comments_and_compiler_res) = move_lang::Compiler::new(&[path], deps)
+    use move_compiler::PASS_COMPILATION;
+    let (mut files, comments_and_compiler_res) = move_compiler::Compiler::new(&[path], deps)
         .set_pre_compiled_lib_opt(pre_compiled_deps)
         .set_named_address_values(named_address_mapping)
         .run::<PASS_COMPILATION>()?;

@@ -4,6 +4,7 @@
 // Defines Forge Tests
 pub mod event_fetcher;
 pub mod fullnode;
+pub mod nft_transaction;
 pub mod replay_tooling;
 pub mod rest_api;
 pub mod scripts_and_modules;
@@ -29,6 +30,8 @@ mod operational_tooling;
 mod release_flow;
 #[cfg(test)]
 mod state_sync;
+#[cfg(test)]
+mod state_sync_v2;
 #[cfg(test)]
 mod storage;
 

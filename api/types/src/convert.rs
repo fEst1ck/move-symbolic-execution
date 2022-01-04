@@ -4,19 +4,16 @@
 use crate::{
     Bytecode, DirectWriteSet, Event, HexEncodedBytes, MoveFunction, MoveModuleBytecode,
     MoveResource, MoveScriptBytecode, MoveType, MoveValue, ScriptFunctionId, ScriptFunctionPayload,
-    ScriptPayload, ScriptWriteSet, Transaction, TransactionData, TransactionInfo,
-    TransactionOnChainData, TransactionPayload, UserTransactionRequest, WriteSet, WriteSetChange,
-    WriteSetPayload,
+    ScriptPayload, ScriptWriteSet, Transaction, TransactionInfo, TransactionOnChainData,
+    TransactionPayload, UserTransactionRequest, WriteSet, WriteSetChange, WriteSetPayload,
 };
+use diem_crypto::HashValue;
 use diem_transaction_builder::error_explain;
 use diem_types::{
     access_path::{AccessPath, Path},
     chain_id::ChainId,
     contract_event::ContractEvent,
-    transaction::{
-        ModuleBundle, RawTransaction, Script, ScriptFunction, SignedTransaction,
-        TransactionInfoTrait,
-    },
+    transaction::{ModuleBundle, RawTransaction, Script, ScriptFunction, SignedTransaction},
     vm_status::{AbortLocation, KeptVMStatus},
     write_set::WriteOp,
 };
@@ -26,7 +23,7 @@ use move_core_types::{
     language_storage::{ModuleId, StructTag},
     resolver::MoveResolver,
 };
-use resource_viewer::MoveValueAnnotator;
+use move_resource_viewer::MoveValueAnnotator;
 
 use crate::transaction::ModuleBundlePayload;
 use anyhow::{ensure, format_err, Result};
@@ -72,27 +69,18 @@ impl<'a, R: MoveResolver + ?Sized> MoveConverter<'a, R> {
         Ok((txn, payload).into())
     }
 
-    pub fn try_into_transaction<T: TransactionInfoTrait>(
+    pub fn try_into_onchain_transaction(
         &self,
-        data: TransactionData<T>,
-    ) -> Result<Transaction> {
-        match data {
-            TransactionData::OnChain(txn) => self.try_into_onchain_transaction(txn),
-            TransactionData::Pending(txn) => self.try_into_pending_transaction(*txn),
-        }
-    }
-
-    pub fn try_into_onchain_transaction<T: TransactionInfoTrait>(
-        &self,
-        data: TransactionOnChainData<T>,
+        timestamp: u64,
+        data: TransactionOnChainData,
     ) -> Result<Transaction> {
         use diem_types::transaction::Transaction::*;
-        let info = self.into_transaction_info(data.version, &data.info);
+        let info = self.into_transaction_info(data.version, &data.info, data.accumulator_root_hash);
         let events = self.try_into_events(&data.events)?;
         Ok(match data.transaction {
             UserTransaction(txn) => {
                 let payload = self.try_into_transaction_payload(txn.payload().clone())?;
-                (&txn, info, payload, events).into()
+                (&txn, info, payload, events, timestamp).into()
             }
             GenesisTransaction(write_set) => {
                 let payload = self.try_into_write_set_payload(write_set)?;
@@ -102,19 +90,21 @@ impl<'a, R: MoveResolver + ?Sized> MoveConverter<'a, R> {
         })
     }
 
-    pub fn into_transaction_info<T: TransactionInfoTrait>(
+    pub fn into_transaction_info(
         &self,
         version: u64,
-        info: &T,
+        info: &diem_types::transaction::TransactionInfo,
+        accumulator_root_hash: HashValue,
     ) -> TransactionInfo {
         TransactionInfo {
             version: version.into(),
             hash: info.transaction_hash().into(),
-            state_root_hash: info.state_root_hash().into(),
+            state_root_hash: info.state_change_hash().into(),
             event_root_hash: info.event_root_hash().into(),
             gas_used: info.gas_used().into(),
             success: info.status().is_success(),
             vm_status: self.explain_vm_status(info.status()),
+            accumulator_root_hash: accumulator_root_hash.into(),
         }
     }
 
@@ -293,6 +283,13 @@ impl<'a, R: MoveResolver + ?Sized> MoveConverter<'a, R> {
                 let func = code
                     .find_script_function(function.name.as_ident_str())
                     .ok_or_else(|| format_err!("could not find script function by {}", function))?;
+                ensure!(
+                    func.generic_type_params.len() == type_arguments.len(),
+                    "expect {} type arguments for script function {}, but got {}",
+                    func.generic_type_params.len(),
+                    function,
+                    type_arguments.len()
+                );
                 let args = self
                     .try_into_move_values(func, arguments)?
                     .iter()
@@ -364,17 +361,29 @@ impl<'a, R: MoveResolver + ?Sized> MoveConverter<'a, R> {
             .collect::<Vec<_>>();
         ensure!(
             arg_types.len() == args.len(),
-            "invalid arguments: expected arguments {:?}, but got {:?}",
-            arg_types,
-            args
+            "expected {} arguments [{}], but got {} ({:?})",
+            arg_types.len(),
+            arg_types
+                .into_iter()
+                .map(|t| t.json_type_name())
+                .collect::<Vec<String>>()
+                .join(", "),
+            args.len(),
+            args,
         );
         arg_types
             .into_iter()
             .zip(args.into_iter())
             .enumerate()
             .map(|(i, (arg_type, arg))| {
-                self.try_into_move_value(&arg_type, arg)
-                    .map_err(|e| format_err!("parse #{} argument failed: {:?}", i + 1, e))
+                self.try_into_move_value(&arg_type, arg).map_err(|e| {
+                    format_err!(
+                        "parse arguments[{}] failed, expect {}, caused by error: {}",
+                        i,
+                        arg_type.json_type_name(),
+                        e,
+                    )
+                })
             })
             .collect::<Result<_>>()
     }

@@ -2,16 +2,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // deno-lint-ignore-file no-explicit-any
+// deno-lint-ignore-file ban-types
 import * as DiemTypes from "./generated/diemTypes/mod.ts";
-import * as context from "./context.ts";
 import * as devapi from "./devapi.ts";
 import * as ed from "https://deno.land/x/ed25519@1.0.1/mod.ts";
+import * as mv from "./move.ts";
 import * as util from "https://deno.land/std@0.85.0/node/util.ts";
 import { BcsSerializer } from "./generated/bcs/mod.ts";
 import { bytes, ListTuple, uint8 } from "./generated/serde/types.ts";
 import { createHash } from "https://deno.land/std@0.77.0/hash/mod.ts";
+import { defaultUserContext, UserContext } from "./context.ts";
 
-const textEncoder = new util.TextEncoder();
+export { asciiToHex } from "./move.ts";
+
+const textDecoder = new util.TextDecoder();
 
 export async function buildAndSubmitTransaction(
   addressStr: string,
@@ -35,7 +39,7 @@ export async function buildAndSubmitTransaction(
     signingMsg,
   );
 
-  return await devapi.postTransactionBcs(signedTxnBytes);
+  return await devapi.submitBcsTransaction(signedTxnBytes);
 }
 
 export function buildScriptFunctionTransaction(
@@ -61,29 +65,42 @@ export function buildScriptFunctionTransaction(
 export async function invokeScriptFunction(
   scriptFunction: string,
   typeArguments: string[],
-  args: any[],
+  args: mv.MoveType[],
 ): Promise<any> {
-  return await invokeScriptFunctionWithoutContext(
-    context.senderAddress,
-    await devapi.sequenceNumber(),
-    context.privateKey(),
+  return await invokeScriptFunctionForContext(
+    defaultUserContext,
     scriptFunction,
     typeArguments,
     args,
   );
 }
 
+export async function invokeScriptFunctionForContext(
+  userContext: UserContext,
+  scriptFunction: string,
+  typeArguments: string[],
+  args: mv.MoveType[],
+): Promise<any> {
+  return await invokeScriptFunctionForAddress(
+    userContext.address,
+    await devapi.sequenceNumber(userContext.address),
+    await userContext.readPrivateKey(),
+    scriptFunction,
+    typeArguments,
+    args,
+  );
+}
 // Invokes a script function using the Dev API's signing_message/ JSON endpoint.
-export async function invokeScriptFunctionWithoutContext(
-  addressStr: string,
+export async function invokeScriptFunctionForAddress(
+  senderAddressStr: string,
   sequenceNumber: number,
   privateKeyBytes: Uint8Array,
   scriptFunction: string,
   typeArguments: string[],
-  args: any[],
+  args: mv.MoveType[],
 ): Promise<any> {
   const request: any = {
-    "sender": addressStr,
+    "sender": senderAddressStr,
     "sequence_number": `${sequenceNumber}`,
     "max_gas_amount": "1000000",
     "gas_unit_price": "0",
@@ -93,12 +110,12 @@ export async function invokeScriptFunctionWithoutContext(
       "type": "script_function_payload",
       "function": scriptFunction,
       "type_arguments": typeArguments,
-      "arguments": normalizeScriptFunctionArgs(args),
+      "arguments": args.map((a) => a.encode()),
     },
   };
 
-  const signingMsgPayload = await devapi.postTransactionSigningMessage(
-    JSON.stringify(request),
+  const signingMsgPayload = await devapi.createSigningMessage(
+    request,
   );
   const signingMsg = signingMsgPayload.message.slice(2); // remove 0x prefix
 
@@ -110,7 +127,7 @@ export async function invokeScriptFunctionWithoutContext(
     "signature": signature,
   };
 
-  return await devapi.postTransactionJson(JSON.stringify(request));
+  return await devapi.submitTransaction(request);
 }
 
 export function newRawTransaction(
@@ -177,19 +194,6 @@ export function hexToAccountAddress(hex: string): DiemTypes.AccountAddress {
   return new DiemTypes.AccountAddress(senderListTuple);
 }
 
-function normalizeScriptFunctionArgs(args: any[]) {
-  return args.map((a) => {
-    if (isString(a) && !a.startsWith("0x")) {
-      return bufferToHex(textEncoder.encode(a));
-    }
-    return a;
-  });
-}
-
-function isString(value: any) {
-  return typeof value === "string" || value instanceof String;
-}
-
 export function bufferToHex(buffer: any) {
   return [...new Uint8Array(buffer)]
     .map((b) => b.toString(16).padStart(2, "0"))
@@ -214,11 +218,7 @@ function hexToBytes(hex: string): Uint8Array {
   return bytes;
 }
 
-export function hexToAscii(hexx: string) {
-  const hex = hexx.toString(); // normalize
-  let str = "";
-  for (let i = 0; i < hex.length; i += 2) {
-    str += String.fromCharCode(parseInt(hex.substr(i, 2), 16));
-  }
-  return str;
+export function hexToAscii(hex: string) {
+  const bytes = hexToBytes(hex);
+  return textDecoder.decode(bytes);
 }

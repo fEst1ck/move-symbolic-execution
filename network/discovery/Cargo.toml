@@ -16,24 +16,24 @@ once_cell = "1.7.2"
 serde_yaml = "0.8.17"
 tokio = { version = "1.8.1", features = ["full"] }
 
-channel = {path = "../../common/channel"}
+channel = {path = "../../crates/channel"}
 bcs = "0.1.2"
 event-notifications = { path = "../../state-sync/inter-component/event-notifications" }
 diem-config = { path = "../../config"}
 diem-crypto = {path = "../../crates/diem-crypto"}
-diem-logger = {path = "../../common/logger"}
-diem-metrics = {path = "../../common/metrics"}
-diem-time-service = {path = "../../common/time-service"}
+diem-logger = {path = "../../crates/diem-logger"}
+diem-metrics = {path = "../../crates/diem-metrics"}
+diem-time-service = {path = "../../crates/diem-time-service"}
 diem-secure-storage = { path = "../../secure/storage" }
 diem-network-address-encryption = {path = "../../config/management/network-address-encryption"}
 diem-types = {path = "../../types"}
-diem-workspace-hack = { path = "../../common/workspace-hack" }
+diem-workspace-hack = { version = "0.1", path = "../../crates/diem-workspace-hack" }
 move-core-types = { path = "../../language/move-core/types" }
 network = {path = "../../network"}
-short-hex-str = { path = "../../common/short-hex-str" }
+short-hex-str = { path = "../../crates/short-hex-str" }
 
 [dev-dependencies]
 diem-config = { path = "../../config", features = ["testing"]}
-diem-temppath = { path = "../../common/temppath" }
+diem-temppath = { path = "../../crates/diem-temppath" }
 netcore = { path = "../netcore", features = ["fuzzing"] }
 rand = "0.8.3"

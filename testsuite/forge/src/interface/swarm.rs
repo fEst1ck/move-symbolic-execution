@@ -2,19 +2,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{ChainInfo, FullNode, NodeExt, Result, Validator, Version};
-use anyhow::anyhow;
+use anyhow::{anyhow, bail};
 use diem_config::config::NodeConfig;
-use diem_sdk::{client::BlockingClient, types::PeerId};
-use std::{
-    thread,
-    time::{Duration, Instant},
-};
+use diem_rest_client::Client as RestClient;
+use diem_sdk::types::PeerId;
+use futures::future::try_join_all;
+use std::time::{Duration, Instant};
+use tokio::runtime::Runtime;
 
 /// Trait used to represent a running network comprised of Validators and FullNodes
-pub trait Swarm {
+#[async_trait::async_trait]
+pub trait Swarm: Sync {
     /// Performs a health check on the entire swarm, ensuring all Nodes are Live and that no forks
     /// have occurred
-    fn health_check(&mut self) -> Result<()>;
+    async fn health_check(&mut self) -> Result<()>;
 
     /// Returns an Iterator of references to all the Validators in the Swarm
     fn validators<'a>(&'a self) -> Box<dyn Iterator<Item = &'a dyn Validator> + 'a>;
@@ -66,48 +67,56 @@ pub trait Swarm {
 
 impl<T: ?Sized> SwarmExt for T where T: Swarm {}
 
+#[async_trait::async_trait]
 pub trait SwarmExt: Swarm {
-    fn liveness_check(&self, deadline: Instant) -> Result<()> {
+    async fn liveness_check(&self, deadline: Instant) -> Result<()> {
         let liveness_check_seconds = 10;
         let validators = self.validators().collect::<Vec<_>>();
         let full_nodes = self.full_nodes().collect::<Vec<_>>();
 
-        while !validators
-            .iter()
-            .map(|node| node.liveness_check(liveness_check_seconds))
-            .chain(
-                full_nodes
-                    .iter()
-                    .map(|node| node.liveness_check(liveness_check_seconds)),
-            )
-            .all(|r| r.is_ok())
+        while try_join_all(
+            validators
+                .iter()
+                .map(|node| node.liveness_check(liveness_check_seconds))
+                .chain(
+                    full_nodes
+                        .iter()
+                        .map(|node| node.liveness_check(liveness_check_seconds)),
+                ),
+        )
+        .await
+        .is_err()
         {
             if Instant::now() > deadline {
                 return Err(anyhow!("Swarm liveness check timed out"));
             }
 
-            thread::sleep(Duration::from_millis(500));
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
 
         Ok(())
     }
 
     /// Waits for the swarm to achieve connectivity
-    fn wait_for_connectivity(&self, deadline: Instant) -> Result<()> {
+    async fn wait_for_connectivity(&self, deadline: Instant) -> Result<()> {
         let validators = self.validators().collect::<Vec<_>>();
         let full_nodes = self.full_nodes().collect::<Vec<_>>();
 
-        while !validators
-            .iter()
-            .map(|node| node.check_connectivity(validators.len() - 1))
-            .chain(full_nodes.iter().map(|node| node.check_connectivity()))
-            .all(|r| r.unwrap_or(false))
+        while !try_join_all(
+            validators
+                .iter()
+                .map(|node| node.check_connectivity(validators.len() - 1))
+                .chain(full_nodes.iter().map(|node| node.check_connectivity())),
+        )
+        .await
+        .map(|v| v.iter().all(|r| *r))
+        .unwrap_or(false)
         {
             if Instant::now() > deadline {
                 return Err(anyhow!("waiting for swarm connectivity timed out"));
             }
 
-            thread::sleep(Duration::from_millis(500));
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
 
         Ok(())
@@ -116,31 +125,47 @@ pub trait SwarmExt: Swarm {
     /// Perform a safety check, ensuring that no forks have occurred in the network.
     fn fork_check(&self) -> Result<()> {
         // Checks if root_hashes are equal across all nodes at a given version
-        fn are_root_hashes_equal_at_version(
-            clients: &[BlockingClient],
+        async fn are_root_hashes_equal_at_version(
+            clients: &[RestClient],
             version: u64,
         ) -> Result<bool> {
-            let root_hashes = clients
-                .iter()
-                .map(|node| {
-                    node.get_metadata_by_version(version)
-                        .map(|r| r.into_inner().accumulator_root_hash)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+            let root_hashes = try_join_all(
+                clients
+                    .iter()
+                    .map(|node| node.get_transaction_by_version(version))
+                    .collect::<Vec<_>>(),
+            )
+            .await?
+            .into_iter()
+            .map(|r| {
+                r.into_inner()
+                    .transaction_info()
+                    .unwrap()
+                    .accumulator_root_hash
+            })
+            .collect::<Vec<_>>();
 
             Ok(root_hashes.windows(2).all(|w| w[0] == w[1]))
         }
 
+        let runtime = Runtime::new().unwrap();
+
         let clients = self
             .validators()
-            .map(|node| node.json_rpc_client())
-            .chain(self.full_nodes().map(|node| node.json_rpc_client()))
+            .map(|node| node.rest_client())
+            .chain(self.full_nodes().map(|node| node.rest_client()))
             .collect::<Vec<_>>();
 
-        let versions = clients
-            .iter()
-            .map(|node| node.get_metadata().map(|r| r.into_inner().version))
-            .collect::<Result<Vec<_>, _>>()?;
+        let versions = runtime
+            .block_on(try_join_all(
+                clients
+                    .iter()
+                    .map(|node| node.get_ledger_information())
+                    .collect::<Vec<_>>(),
+            ))?
+            .into_iter()
+            .map(|resp| resp.into_inner().version)
+            .collect::<Vec<u64>>();
         let min_version = versions
             .iter()
             .min()
@@ -152,16 +177,16 @@ pub trait SwarmExt: Swarm {
             .copied()
             .ok_or_else(|| anyhow!("Unable to query nodes for their latest version"))?;
 
-        if !are_root_hashes_equal_at_version(&clients, min_version)? {
+        if !runtime.block_on(are_root_hashes_equal_at_version(&clients, min_version))? {
             return Err(anyhow!("Fork check failed"));
         }
 
-        self.wait_for_all_nodes_to_catchup_to_version(
+        runtime.block_on(self.wait_for_all_nodes_to_catchup_to_version(
             max_version,
             Instant::now() + Duration::from_secs(10),
-        )?;
+        ))?;
 
-        if !are_root_hashes_equal_at_version(&clients, max_version)? {
+        if !runtime.block_on(are_root_hashes_equal_at_version(&clients, max_version))? {
             return Err(anyhow!("Fork check failed"));
         }
 
@@ -169,22 +194,32 @@ pub trait SwarmExt: Swarm {
     }
 
     /// Waits for all nodes to have caught up to the specified `verison`.
-    fn wait_for_all_nodes_to_catchup_to_version(
+    async fn wait_for_all_nodes_to_catchup_to_version(
         &self,
         version: u64,
         deadline: Instant,
     ) -> Result<()> {
         let clients = self
             .validators()
-            .map(|node| node.json_rpc_client())
-            .chain(self.full_nodes().map(|node| node.json_rpc_client()))
+            .map(|node| node.rest_client())
+            .chain(self.full_nodes().map(|node| node.rest_client()))
             .collect::<Vec<_>>();
 
-        while !clients
-            .iter()
-            .map(|node| node.get_metadata().map(|r| r.into_inner().version))
-            .all(|maybe| maybe.map(|v| v as u64 >= version).unwrap_or(false))
-        {
+        loop {
+            let results =
+                try_join_all(clients.iter().map(|node| node.get_ledger_information())).await;
+            let all_catchup = results
+                .map(|resps| {
+                    resps
+                        .into_iter()
+                        .map(|r| r.into_inner().version)
+                        .all(|v| v >= version)
+                })
+                .unwrap_or(false);
+            if all_catchup {
+                break;
+            }
+
             if Instant::now() > deadline {
                 return Err(anyhow!(
                     "waiting for nodes to catch up to version {} timed out",
@@ -192,7 +227,7 @@ pub trait SwarmExt: Swarm {
                 ));
             }
 
-            thread::sleep(Duration::from_millis(500));
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
 
         Ok(())
@@ -202,20 +237,27 @@ pub trait SwarmExt: Swarm {
     /// for its current version, selects the max version, then waits for all nodes to catch up to
     /// that version. Once done, we can guarantee that all transactions committed before invocation
     /// of this function are available at all the nodes in the swarm
-    fn wait_for_all_nodes_to_catchup(&self, deadline: Instant) -> Result<()> {
+    async fn wait_for_all_nodes_to_catchup(&self, deadline: Instant) -> Result<()> {
         let clients = self
             .validators()
-            .map(|node| node.json_rpc_client())
-            .chain(self.full_nodes().map(|node| node.json_rpc_client()))
+            .map(|node| node.rest_client())
+            .chain(self.full_nodes().map(|node| node.rest_client()))
             .collect::<Vec<_>>();
 
-        let latest_version = clients
-            .iter()
-            .map(|node| node.get_metadata().map(|r| r.into_inner().version))
-            .map(|maybe| maybe.unwrap_or(0))
-            .max()
-            .ok_or_else(|| anyhow!("Unable to query nodes for their latest version"))?;
+        if clients.is_empty() {
+            bail!("no nodes available")
+        }
+        let mut latest_version = 0u64;
+        for c in clients {
+            latest_version = latest_version.max(
+                c.get_ledger_information()
+                    .await
+                    .map(|r| r.into_inner().version)
+                    .unwrap_or(0),
+            );
+        }
 
         self.wait_for_all_nodes_to_catchup_to_version(latest_version, deadline)
+            .await
     }
 }

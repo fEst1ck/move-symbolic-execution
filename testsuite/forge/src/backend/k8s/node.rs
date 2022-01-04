@@ -1,18 +1,24 @@
 // Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{scale_sts_replica, FullNode, HealthCheckError, Node, Result, Validator, Version};
-use anyhow::format_err;
-use diem_config::config::NodeConfig;
-use diem_sdk::{
-    client::{BlockingClient, Client as JsonRpcClient},
-    types::PeerId,
+use crate::{
+    scale_sts_replica, FullNode, HealthCheckError, Node, NodeExt, Result, Validator, Version,
 };
+use anyhow::{format_err, Context};
+use diem_config::config::NodeConfig;
+use diem_rest_client::Client as RestClient;
+use diem_sdk::types::PeerId;
 use reqwest::Url;
+use serde_json::Value;
 use std::{
     fmt::{Debug, Formatter},
+    process::{Command, Stdio},
     str::FromStr,
+    thread,
+    time::{Duration, Instant},
 };
+
+const NODE_METRIC_PORT: u64 = 9101;
 
 pub struct K8sNode {
     pub(crate) name: String,
@@ -49,8 +55,8 @@ impl K8sNode {
         self.node_id
     }
 
-    pub(crate) fn json_rpc_client(&self) -> JsonRpcClient {
-        JsonRpcClient::new(self.json_rpc_endpoint().to_string())
+    pub(crate) fn rest_client(&self) -> RestClient {
+        RestClient::new(self.rest_api_endpoint())
     }
 
     fn sts_name(&self) -> &str {
@@ -58,6 +64,7 @@ impl K8sNode {
     }
 }
 
+#[async_trait::async_trait]
 impl Node for K8sNode {
     fn peer_id(&self) -> PeerId {
         self.peer_id
@@ -88,8 +95,12 @@ impl Node for K8sNode {
         todo!()
     }
 
-    fn start(&mut self) -> Result<()> {
-        scale_sts_replica(self.sts_name(), 1)
+    async fn start(&mut self) -> Result<()> {
+        scale_sts_replica(self.sts_name(), 1)?;
+        self.wait_until_healthy(Instant::now() + Duration::from_secs(60))
+            .await?;
+
+        Ok(())
     }
 
     fn stop(&mut self) -> Result<()> {
@@ -98,21 +109,80 @@ impl Node for K8sNode {
     }
 
     fn clear_storage(&mut self) -> Result<()> {
-        todo!()
+        let sts_name = self.sts_name.clone();
+        let pvc_name = if sts_name.contains("fullnode") {
+            format!("fn-{}-0", sts_name)
+        } else {
+            sts_name
+        };
+        let delete_pvc_args = ["delete", "pvc", &pvc_name];
+        println!("{:?}", delete_pvc_args);
+        let cleanup_output = Command::new("kubectl")
+            .stdout(Stdio::inherit())
+            .args(&delete_pvc_args)
+            .output()
+            .expect("failed to scale sts replicas");
+        assert!(
+            cleanup_output.status.success(),
+            "{}",
+            String::from_utf8(cleanup_output.stderr).unwrap()
+        );
+
+        Ok(())
     }
 
-    fn health_check(&mut self) -> Result<(), HealthCheckError> {
-        let client = BlockingClient::new(self.json_rpc_endpoint());
-        let results = match client.batch(Vec::new()) {
-            Ok(x) => x,
-            Err(x) => return Err(HealthCheckError::RpcFailure(format_err!(x))),
-        };
-        if results.iter().all(Result::is_ok) {
-            return Ok(());
+    async fn health_check(&mut self) -> Result<(), HealthCheckError> {
+        self.rest_client()
+            .get_ledger_information()
+            .await
+            .map(|_| ())
+            .map_err(|e| {
+                HealthCheckError::Failure(format_err!("K8s node health_check failed: {}", e))
+            })
+    }
+
+    fn counter(&self, counter: &str, port: u64) -> Result<f64> {
+        let response: Value =
+            reqwest::blocking::get(format!("http://localhost:{}/counters", port))?.json()?;
+        if let Value::Number(ref response) = response[counter] {
+            if let Some(response) = response.as_f64() {
+                Ok(response)
+            } else {
+                Err(format_err!(
+                    "Failed to parse counter({}) as f64: {:?}",
+                    counter,
+                    response
+                ))
+            }
+        } else {
+            Err(format_err!(
+                "Counter({}) was not a Value::Number: {:?}",
+                counter,
+                response[counter]
+            ))
         }
-        Err(HealthCheckError::RpcFailure(format_err!(
-            "K8s node health_check failed"
-        )))
+    }
+
+    fn expose_metric(&self) -> Result<u64> {
+        let pod_name = format!("{}-0", self.sts_name);
+        let mut port = NODE_METRIC_PORT + 2 * self.node_id as u64;
+        if pod_name.contains("fullnode") {
+            port += 1;
+        }
+        let port_forward_args = [
+            "port-forward",
+            &format!("pod/{}", pod_name),
+            &format!("{}:{}", port, NODE_METRIC_PORT),
+        ];
+        println!("{:?}", port_forward_args);
+        let _ = Command::new("kubectl")
+            .stdout(Stdio::null())
+            .args(&port_forward_args)
+            .spawn()
+            .with_context(|| format!("Error port forwarding for node {}", pod_name))?;
+        thread::sleep(Duration::from_secs(5));
+
+        Ok(port)
     }
 }
 

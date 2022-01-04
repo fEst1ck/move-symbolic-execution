@@ -27,7 +27,8 @@ use diem_operational_tool::{
     keys::{EncodingType, KeyType},
     test_helper::OperationalTool,
 };
-use diem_sdk::client::{views::VMStatusView, BlockingClient};
+use diem_rest_client::Client as RestClient;
+use diem_sdk::client::views::VMStatusView;
 use diem_secure_storage::{CryptoStorage, KVStorage, Storage};
 use diem_temppath::TempPath;
 use diem_types::{
@@ -49,9 +50,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[test]
-fn test_account_resource() {
-    let (_env, op_tool, _, storage) = launch_swarm_with_op_tool_and_backend(1);
+#[tokio::test]
+async fn test_account_resource() {
+    let (_env, op_tool, _, storage) = launch_swarm_with_op_tool_and_backend(1).await;
 
     // Fetch the owner account resource
     let owner_account = storage.get::<AccountAddress>(OWNER_ACCOUNT).unwrap().value;
@@ -77,9 +78,9 @@ fn test_account_resource() {
     );
 }
 
-#[test]
-fn test_auto_validate_options() {
-    let (swarm, op_tool, backend, _) = launch_swarm_with_op_tool_and_backend(1);
+#[tokio::test]
+async fn test_auto_validate_options() {
+    let (swarm, op_tool, backend, _) = launch_swarm_with_op_tool_and_backend(1).await;
 
     // Rotate the operator key with a really low timeout to prevent validation
     let (txn_ctx, _) = op_tool
@@ -88,8 +89,10 @@ fn test_auto_validate_options() {
     assert!(txn_ctx.execution_result.is_none());
 
     // Now wait for transaction execution
-    let client = swarm.validators().next().unwrap().json_rpc_client();
-    wait_for_account_sequence_number(&client, txn_ctx.address, txn_ctx.sequence_number).unwrap();
+    let client = swarm.validators().next().unwrap().rest_client();
+    wait_for_account_sequence_number(&client, txn_ctx.address, txn_ctx.sequence_number)
+        .await
+        .unwrap();
 
     // Verify that the transaction was executed correctly
     let txn_ctx = op_tool
@@ -104,9 +107,9 @@ fn test_auto_validate_options() {
     assert_eq!(VMStatusView::Executed, txn_ctx.execution_result.unwrap());
 }
 
-#[test]
-fn test_consensus_key_rotation() {
-    let (_env, op_tool, backend, mut storage) = launch_swarm_with_op_tool_and_backend(1);
+#[tokio::test]
+async fn test_consensus_key_rotation() {
+    let (_env, op_tool, backend, mut storage) = launch_swarm_with_op_tool_and_backend(1).await;
 
     // Rotate the consensus key
     let (txn_ctx, new_consensus_key) = op_tool.rotate_consensus_key(&backend, false).unwrap();
@@ -137,30 +140,30 @@ fn test_consensus_key_rotation() {
     assert_eq!(rotated_consensus_key, new_consensus_key);
 }
 
-#[test]
-fn test_create_operator_hex_file() {
-    create_operator_with_file_writer(write_key_to_file_hex_format);
+#[tokio::test]
+async fn test_create_operator_hex_file() {
+    create_operator_with_file_writer(write_key_to_file_hex_format).await;
 }
 
-#[test]
-fn test_create_operator_bcs_file() {
-    create_operator_with_file_writer(write_key_to_file_bcs_format);
+#[tokio::test]
+async fn test_create_operator_bcs_file() {
+    create_operator_with_file_writer(write_key_to_file_bcs_format).await;
 }
 
-#[test]
-fn test_create_validator_hex_file() {
-    create_validator_with_file_writer(write_key_to_file_hex_format);
+#[tokio::test]
+async fn test_create_validator_hex_file() {
+    create_validator_with_file_writer(write_key_to_file_hex_format).await;
 }
 
-#[test]
-fn test_create_validator_bcs_file() {
-    create_validator_with_file_writer(write_key_to_file_bcs_format);
+#[tokio::test]
+async fn test_create_validator_bcs_file() {
+    create_validator_with_file_writer(write_key_to_file_bcs_format).await;
 }
 
-#[test]
-fn test_disable_address_validation() {
+#[tokio::test]
+async fn test_disable_address_validation() {
     let num_nodes = 1;
-    let (_env, op_tool, backend, _) = launch_swarm_with_op_tool_and_backend(num_nodes);
+    let (_env, op_tool, backend, _) = launch_swarm_with_op_tool_and_backend(num_nodes).await;
 
     // Try to set the validator config with a bad address and verify failure
     let bad_network_address = NetworkAddress::from_str("/dns4/127.0.0.1/tcp/1234").unwrap();
@@ -203,10 +206,10 @@ fn test_disable_address_validation() {
         .unwrap();
 }
 
-#[test]
-fn test_set_operator_and_add_new_validator() {
+#[tokio::test]
+async fn test_set_operator_and_add_new_validator() {
     let num_nodes = 3;
-    let (mut swarm, op_tool, _, _) = launch_swarm_with_op_tool_and_backend(num_nodes);
+    let (mut swarm, op_tool, _, _) = launch_swarm_with_op_tool_and_backend(num_nodes).await;
 
     // Create new validator and validator operator keys and accounts
     let (validator_key, validator_account) = create_new_test_account();
@@ -248,8 +251,10 @@ fn test_set_operator_and_add_new_validator() {
         .unwrap();
 
     // Wait for transaction execution
-    let client = validator.json_rpc_client();
-    wait_for_account_sequence_number(&client, txn_ctx.address, txn_ctx.sequence_number).unwrap();
+    let client = validator.rest_client();
+    wait_for_account_sequence_number(&client, txn_ctx.address, txn_ctx.sequence_number)
+        .await
+        .unwrap();
 
     // Verify that the transaction was executed
     let txn_ctx = op_tool
@@ -284,7 +289,9 @@ fn test_set_operator_and_add_new_validator() {
     assert!(txn_ctx.execution_result.is_none());
 
     // Wait for transaction execution
-    wait_for_account_sequence_number(&client, txn_ctx.address, txn_ctx.sequence_number).unwrap();
+    wait_for_account_sequence_number(&client, txn_ctx.address, txn_ctx.sequence_number)
+        .await
+        .unwrap();
 
     // Verify the operator has been set correctly
     let account_state = diem_json_rpc
@@ -320,7 +327,9 @@ fn test_set_operator_and_add_new_validator() {
     assert!(txn_ctx.execution_result.is_none());
 
     // Wait for transaction execution
-    wait_for_account_sequence_number(&client, txn_ctx.address, txn_ctx.sequence_number).unwrap();
+    wait_for_account_sequence_number(&client, txn_ctx.address, txn_ctx.sequence_number)
+        .await
+        .unwrap();
 
     // Check the validator set size
     let validator_set_infos = op_tool.validator_set(None, Some(&backend)).unwrap();
@@ -335,7 +344,9 @@ fn test_set_operator_and_add_new_validator() {
         .unwrap();
 
     // Wait for transaction execution
-    wait_for_account_sequence_number(&client, txn_ctx.address, txn_ctx.sequence_number).unwrap();
+    wait_for_account_sequence_number(&client, txn_ctx.address, txn_ctx.sequence_number)
+        .await
+        .unwrap();
     // Verify that the transaction wasn't executed
     let txn_ctx = op_tool
         .validate_transaction(txn_ctx.address, txn_ctx.sequence_number)
@@ -374,9 +385,9 @@ fn test_set_operator_and_add_new_validator() {
     }
 }
 
-#[test]
-fn test_extract_private_key() {
-    let (swarm, op_tool, backend, storage) = launch_swarm_with_op_tool_and_backend(1);
+#[tokio::test]
+async fn test_extract_private_key() {
+    let (swarm, op_tool, backend, storage) = launch_swarm_with_op_tool_and_backend(1).await;
 
     // Extract the operator private key to file
     let node_config_path = swarm.validators().next().unwrap().config_path();
@@ -398,9 +409,9 @@ fn test_extract_private_key() {
     assert_eq!(key_from_storage, key_from_file);
 }
 
-#[test]
-fn test_extract_public_key() {
-    let (swarm, op_tool, backend, storage) = launch_swarm_with_op_tool_and_backend(1);
+#[tokio::test]
+async fn test_extract_public_key() {
+    let (swarm, op_tool, backend, storage) = launch_swarm_with_op_tool_and_backend(1).await;
 
     // Extract the operator public key to file
     let node_config_path = swarm.validators().next().unwrap().config_path();
@@ -422,9 +433,9 @@ fn test_extract_public_key() {
     assert_eq!(key_from_storage, key_from_file);
 }
 
-#[test]
-fn test_extract_peer_from_storage() {
-    let (swarm, op_tool, backend, _) = launch_swarm_with_op_tool_and_backend(1);
+#[tokio::test]
+async fn test_extract_peer_from_storage() {
+    let (swarm, op_tool, backend, _) = launch_swarm_with_op_tool_and_backend(1).await;
 
     // Check Validator Network Key
     let config = swarm.validators().next().unwrap().config().clone();
@@ -548,9 +559,9 @@ fn test_generate_key() {
     );
 }
 
-#[test]
-fn test_insert_waypoint() {
-    let (_env, op_tool, backend, storage) = launch_swarm_with_op_tool_and_backend(1);
+#[tokio::test]
+async fn test_insert_waypoint() {
+    let (_env, op_tool, backend, storage) = launch_swarm_with_op_tool_and_backend(1).await;
 
     // Get the current waypoint from storage
     let current_waypoint: Waypoint = storage.get(WAYPOINT).unwrap().value;
@@ -581,18 +592,20 @@ fn test_insert_waypoint() {
     );
 }
 
-#[test]
-fn test_fullnode_network_key_rotation() {
+#[tokio::test]
+async fn test_fullnode_network_key_rotation() {
     let num_nodes = 1;
-    let (env, op_tool, backend, storage) = launch_swarm_with_op_tool_and_backend(num_nodes);
+    let (env, op_tool, backend, storage) = launch_swarm_with_op_tool_and_backend(num_nodes).await;
 
     // Rotate the full node network key
     let (txn_ctx, new_network_key) = op_tool.rotate_fullnode_network_key(&backend, true).unwrap();
     assert!(txn_ctx.execution_result.is_none());
 
     // Wait for transaction execution
-    let client = env.validators().next().unwrap().json_rpc_client();
-    wait_for_account_sequence_number(&client, txn_ctx.address, txn_ctx.sequence_number).unwrap();
+    let client = env.validators().next().unwrap().rest_client();
+    wait_for_account_sequence_number(&client, txn_ctx.address, txn_ctx.sequence_number)
+        .await
+        .unwrap();
 
     // Verify that the config has been loaded correctly with new key
     let validator_account = storage.get::<AccountAddress>(OWNER_ACCOUNT).unwrap().value;
@@ -614,10 +627,11 @@ fn test_fullnode_network_key_rotation() {
     assert_eq!(new_network_key, info_network_key);
 }
 
-#[test]
-fn test_network_key_rotation() {
+#[tokio::test]
+async fn test_network_key_rotation() {
     let num_nodes = 4;
-    let (mut swarm, op_tool, backend, storage) = launch_swarm_with_op_tool_and_backend(num_nodes);
+    let (mut swarm, op_tool, backend, storage) =
+        launch_swarm_with_op_tool_and_backend(num_nodes).await;
 
     // Rotate the validator network key
     let (txn_ctx, new_network_key) = op_tool
@@ -626,7 +640,7 @@ fn test_network_key_rotation() {
     assert!(txn_ctx.execution_result.is_none());
 
     // Ensure all nodes have received the transaction
-    wait_for_transaction_on_all_nodes(&swarm, txn_ctx.address, txn_ctx.sequence_number);
+    wait_for_transaction_on_all_nodes(&swarm, txn_ctx.address, txn_ctx.sequence_number).await;
 
     // Verify that config has been loaded correctly with new key
     let validator_account = storage.get::<AccountAddress>(OWNER_ACCOUNT).unwrap().value;
@@ -654,14 +668,15 @@ fn test_network_key_rotation() {
     validator.start().unwrap();
     swarm
         .wait_for_connectivity(Instant::now() + Duration::from_secs(60))
+        .await
         .unwrap();
 }
 
-#[test]
-fn test_network_key_rotation_recovery() {
+#[tokio::test]
+async fn test_network_key_rotation_recovery() {
     let num_nodes = 4;
     let (mut swarm, op_tool, backend, mut storage) =
-        launch_swarm_with_op_tool_and_backend(num_nodes);
+        launch_swarm_with_op_tool_and_backend(num_nodes).await;
 
     // Rotate the network key in storage manually and perform a key rotation using the op_tool.
     // Here, we expected the op_tool to see that the network key in storage doesn't match the one
@@ -674,7 +689,7 @@ fn test_network_key_rotation_recovery() {
     assert_eq!(new_network_key, to_x25519(rotated_network_key).unwrap());
 
     // Ensure all nodes have received the transaction
-    wait_for_transaction_on_all_nodes(&swarm, txn_ctx.address, txn_ctx.sequence_number);
+    wait_for_transaction_on_all_nodes(&swarm, txn_ctx.address, txn_ctx.sequence_number).await;
 
     // Verify that config has been loaded correctly with new key
     let validator_account = storage.get::<AccountAddress>(OWNER_ACCOUNT).unwrap().value;
@@ -702,19 +717,22 @@ fn test_network_key_rotation_recovery() {
     validator.start().unwrap();
     swarm
         .wait_for_connectivity(Instant::now() + Duration::from_secs(60))
+        .await
         .unwrap();
 }
 
-#[test]
-fn test_operator_key_rotation() {
-    let (env, op_tool, backend, storage) = launch_swarm_with_op_tool_and_backend(1);
+#[tokio::test]
+async fn test_operator_key_rotation() {
+    let (env, op_tool, backend, storage) = launch_swarm_with_op_tool_and_backend(1).await;
 
     let (txn_ctx, _) = op_tool.rotate_operator_key(&backend, true).unwrap();
     assert!(txn_ctx.execution_result.is_none());
 
     // Wait for transaction execution
-    let client = env.validators().next().unwrap().json_rpc_client();
-    wait_for_account_sequence_number(&client, txn_ctx.address, txn_ctx.sequence_number).unwrap();
+    let client = env.validators().next().unwrap().rest_client();
+    wait_for_account_sequence_number(&client, txn_ctx.address, txn_ctx.sequence_number)
+        .await
+        .unwrap();
 
     // Verify that the transaction was executed correctly
     let txn_ctx = op_tool
@@ -735,9 +753,9 @@ fn test_operator_key_rotation() {
     assert_eq!(new_consensus_key, config_consensus_key);
 }
 
-#[test]
-fn test_operator_key_rotation_recovery() {
-    let (env, op_tool, backend, mut storage) = launch_swarm_with_op_tool_and_backend(1);
+#[tokio::test]
+async fn test_operator_key_rotation_recovery() {
+    let (env, op_tool, backend, mut storage) = launch_swarm_with_op_tool_and_backend(1).await;
 
     // Rotate the operator key
     let (txn_ctx, new_operator_key) = op_tool.rotate_operator_key(&backend, false).unwrap();
@@ -770,8 +788,10 @@ fn test_operator_key_rotation_recovery() {
     assert_eq!(rotated_operator_key, new_operator_key);
 
     // Wait for transaction execution
-    let client = env.validators().next().unwrap().json_rpc_client();
-    wait_for_account_sequence_number(&client, txn_ctx.address, txn_ctx.sequence_number).unwrap();
+    let client = env.validators().next().unwrap().rest_client();
+    wait_for_account_sequence_number(&client, txn_ctx.address, txn_ctx.sequence_number)
+        .await
+        .unwrap();
 
     // Verify that the transaction was executed correctly
     let txn_ctx = op_tool
@@ -788,9 +808,9 @@ fn test_operator_key_rotation_recovery() {
     );
 }
 
-#[test]
-fn test_print_account() {
-    let (_env, op_tool, backend, storage) = launch_swarm_with_op_tool_and_backend(1);
+#[tokio::test]
+async fn test_print_account() {
+    let (_env, op_tool, backend, storage) = launch_swarm_with_op_tool_and_backend(1).await;
 
     // Print the owner account
     let op_tool_owner_account = op_tool.print_account(OWNER_ACCOUNT, &backend).unwrap();
@@ -806,9 +826,9 @@ fn test_print_account() {
     assert_eq!(storage_operator_account, op_tool_operator_account);
 }
 
-#[test]
-fn test_print_key() {
-    let (_env, op_tool, backend, storage) = launch_swarm_with_op_tool_and_backend(1);
+#[tokio::test]
+async fn test_print_key() {
+    let (_env, op_tool, backend, storage) = launch_swarm_with_op_tool_and_backend(1).await;
 
     // Print the operator key
     let op_tool_operator_key = op_tool.print_key(OPERATOR_KEY, &backend).unwrap();
@@ -821,9 +841,9 @@ fn test_print_key() {
     assert_eq!(storage_consensus_key, op_tool_consensus_key);
 }
 
-#[test]
-fn test_print_waypoints() {
-    let (_env, op_tool, backend, _) = launch_swarm_with_op_tool_and_backend(1);
+#[tokio::test]
+async fn test_print_waypoints() {
+    let (_env, op_tool, backend, _) = launch_swarm_with_op_tool_and_backend(1).await;
 
     // Insert a new waypoint and genesis waypoint into storage
     let inserted_waypoint =
@@ -841,9 +861,9 @@ fn test_print_waypoints() {
     assert_eq!(inserted_waypoint, genesis_waypoint);
 }
 
-#[test]
-fn test_validate_transaction() {
-    let (swarm, op_tool, backend, _) = launch_swarm_with_op_tool_and_backend(1);
+#[tokio::test]
+async fn test_validate_transaction() {
+    let (swarm, op_tool, backend, _) = launch_swarm_with_op_tool_and_backend(1).await;
 
     // Validate an unknown transaction and verify no VM state found
     let operator_account = op_tool.print_account(OPERATOR_ACCOUNT, &backend).unwrap();
@@ -857,8 +877,10 @@ fn test_validate_transaction() {
 
     // Submit a transaction (rotate the operator key) and validate the transaction execution
     let (txn_ctx, _) = op_tool.rotate_operator_key(&backend, true).unwrap();
-    let client = swarm.validators().next().unwrap().json_rpc_client();
-    wait_for_account_sequence_number(&client, operator_account, txn_ctx.sequence_number).unwrap();
+    let client = swarm.validators().next().unwrap().rest_client();
+    wait_for_account_sequence_number(&client, operator_account, txn_ctx.sequence_number)
+        .await
+        .unwrap();
 
     let result = op_tool
         .validate_transaction(operator_account, txn_ctx.sequence_number)
@@ -877,9 +899,9 @@ fn test_validate_transaction() {
     assert_eq!(VMStatusView::Executed, result.unwrap());
 }
 
-#[test]
-fn test_validator_config() {
-    let (_env, op_tool, backend, mut storage) = launch_swarm_with_op_tool_and_backend(1);
+#[tokio::test]
+async fn test_validator_config() {
+    let (_env, op_tool, backend, mut storage) = launch_swarm_with_op_tool_and_backend(1).await;
 
     // Fetch the initial validator config for this operator's owner
     let owner_account = storage.get::<AccountAddress>(OWNER_ACCOUNT).unwrap().value;
@@ -922,9 +944,9 @@ fn test_validator_config() {
     );
 }
 
-#[test]
-fn test_validator_decryption() {
-    let (_env, op_tool, backend, mut storage) = launch_swarm_with_op_tool_and_backend(1);
+#[tokio::test]
+async fn test_validator_decryption() {
+    let (_env, op_tool, backend, mut storage) = launch_swarm_with_op_tool_and_backend(1).await;
 
     // Fetch the validator config and validator info for this operator's owner
     let owner_account = storage.get::<AccountAddress>(OWNER_ACCOUNT).unwrap().value;
@@ -936,12 +958,9 @@ fn test_validator_decryption() {
         .unwrap();
     assert_eq!(1, validator_set_infos.len());
 
-    // Ensure the validator network addresses were decrypted successfully
-    let failed_decryption_address = NetworkAddress::from_str("/dns4/could-not-decrypt").unwrap();
     let config_network_address = validator_config.validator_network_address;
     let info_network_address = validator_set_infos[0].validator_network_address.clone();
     assert_eq!(config_network_address, info_network_address,);
-    assert_ne!(failed_decryption_address, config_network_address);
 
     // Corrupt the network address encryption key in storage
     storage
@@ -960,14 +979,14 @@ fn test_validator_decryption() {
         let config_network_address = validator_config.validator_network_address;
         let info_network_address = validator_set_infos[0].validator_network_address.clone();
         assert_eq!(config_network_address, info_network_address);
-        assert_eq!(failed_decryption_address, config_network_address);
     }
 }
 
-#[test]
-fn test_validator_set() {
+#[tokio::test]
+async fn test_validator_set() {
     let num_nodes = 4;
-    let (_env, op_tool, backend, mut storage) = launch_swarm_with_op_tool_and_backend(num_nodes);
+    let (_env, op_tool, backend, mut storage) =
+        launch_swarm_with_op_tool_and_backend(num_nodes).await;
 
     // Fetch the validator config and validator info for this operator's owner
     let owner_account = storage.get::<AccountAddress>(OWNER_ACCOUNT).unwrap().value;
@@ -1021,10 +1040,32 @@ fn test_validator_set() {
         validator_info.fullnode_network_address,
         validator_config.fullnode_network_address
     );
-    assert_ne!(
+    assert_eq!(
         validator_info.validator_network_address,
         validator_config.validator_network_address
     );
+}
+
+#[tokio::test]
+async fn test_verify_validator_state() {
+    let (_env, op_tool, backend, mut storage) = launch_swarm_with_op_tool_and_backend(1).await;
+
+    let result = op_tool.verify_validator_state(&backend).unwrap();
+    assert!(result.is_valid_state());
+
+    // Rotate consensus key locally, but we do not update it on-chain
+    // Verify the local validator state again.
+    // The local consensus key is no longer mached with that registered on-chain
+    let _ = storage.rotate_key(CONSENSUS_KEY).unwrap();
+    let result = op_tool.verify_validator_state(&backend).unwrap();
+    assert_eq!(result.in_validator_set, Some(true));
+    assert_eq!(result.consensus_key_match, Some(false));
+    assert_eq!(result.consensus_key_unique, Some(true));
+    assert_eq!(result.validator_network_key_match, Some(true));
+    assert_eq!(result.fullnode_network_key_match, Some(true));
+
+    // TODO(khiemngo): consider adding test where the validator is no longer in set
+    // TODO(khiemngo): consider adding test where consensus key is not unique
 }
 
 /// Creates a new account address and key for testing.
@@ -1038,8 +1079,8 @@ fn create_new_test_account() -> (Ed25519PrivateKey, AccountAddress) {
 
 /// Creates a new validator operator using the given file writer and verifies
 /// the operator account is correctly initialized on-chain.
-fn create_operator_with_file_writer(file_writer: fn(&Ed25519PublicKey, PathBuf)) {
-    let (mut swarm, op_tool, _, _) = launch_swarm_with_op_tool_and_backend(1);
+async fn create_operator_with_file_writer(file_writer: fn(&Ed25519PublicKey, PathBuf)) {
+    let (mut swarm, op_tool, _, _) = launch_swarm_with_op_tool_and_backend(1).await;
 
     // Create a new operator key and account
     let (operator_key, operator_account) = create_new_test_account();
@@ -1081,14 +1122,14 @@ fn create_operator_with_file_writer(file_writer: fn(&Ed25519PublicKey, PathBuf))
 
 /// Creates a new validator using the given file writer and verifies
 /// the account is correctly initialized on-chain.
-fn create_validator_with_file_writer(file_writer: fn(&Ed25519PublicKey, PathBuf)) {
-    let (mut swarm, op_tool, _, _) = launch_swarm_with_op_tool_and_backend(1);
+async fn create_validator_with_file_writer(file_writer: fn(&Ed25519PublicKey, PathBuf)) {
+    let (mut swarm, op_tool, _, _) = launch_swarm_with_op_tool_and_backend(1).await;
 
     // Create a new validator key and account
     let (validator_key, validator_account) = create_new_test_account();
 
     let validator = swarm.validators().next().unwrap();
-    let client = validator.json_rpc_client();
+    let client = validator.rest_client();
     // Verify the corresponding account doesn't exist on-chain
     let diem_json_rpc = JsonRpcDiemInterface::new(validator.json_rpc_endpoint().to_string());
     diem_json_rpc
@@ -1113,7 +1154,9 @@ fn create_validator_with_file_writer(file_writer: fn(&Ed25519PublicKey, PathBuf)
     assert_eq!(validator_account, account_address);
 
     // Wait for transaction execution
-    wait_for_account_sequence_number(&client, txn_ctx.address, txn_ctx.sequence_number).unwrap();
+    wait_for_account_sequence_number(&client, txn_ctx.address, txn_ctx.sequence_number)
+        .await
+        .unwrap();
 
     // Verify that the transaction was executed
     let txn_ctx = op_tool
@@ -1136,10 +1179,10 @@ fn create_validator_with_file_writer(file_writer: fn(&Ed25519PublicKey, PathBuf)
 
 /// Launches a validator swarm of a specified size, connects an operational
 /// tool to the first node and fetches that node's secure backend.
-pub fn launch_swarm_with_op_tool_and_backend(
+pub async fn launch_swarm_with_op_tool_and_backend(
     num_nodes: usize,
 ) -> (LocalSwarm, OperationalTool, SecureBackend, Storage) {
-    let swarm = new_local_swarm(num_nodes);
+    let swarm = new_local_swarm(num_nodes).await;
     let chain_id = swarm.chain_id();
     let validator = swarm.validators().next().unwrap();
 
@@ -1165,8 +1208,8 @@ fn write_key_to_file(
     file_path
 }
 
-fn wait_for_account_sequence_number(
-    client: &BlockingClient,
+async fn wait_for_account_sequence_number(
+    client: &RestClient,
     address: AccountAddress,
     seq: u64,
 ) -> Result<()> {
@@ -1174,21 +1217,14 @@ fn wait_for_account_sequence_number(
 
     let start = std::time::Instant::now();
     while start.elapsed() < DEFAULT_WAIT_TIMEOUT {
-        let account_txn = client
-            .get_account_transaction(address, seq, false)?
+        let txns = client
+            .get_account_transactions(address, Some(seq), Some(1))
+            .await?
             .into_inner();
-        if let Some(txn) = account_txn {
-            if let diem_sdk::client::views::TransactionDataView::UserTransaction {
-                sequence_number,
-                ..
-            } = txn.transaction
-            {
-                if sequence_number >= seq {
-                    return Ok(());
-                }
-            }
+        if txns.len() == 1 {
+            return Ok(());
         }
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     bail!(
         "wait for account(address={}) transaction(seq={}) timeout",
@@ -1197,13 +1233,15 @@ fn wait_for_account_sequence_number(
     )
 }
 
-pub fn wait_for_transaction_on_all_nodes(
+pub async fn wait_for_transaction_on_all_nodes(
     swarm: &LocalSwarm,
     account: AccountAddress,
     sequence_number: u64,
 ) {
     for validator in swarm.validators() {
-        let client = validator.json_rpc_client();
-        wait_for_account_sequence_number(&client, account, sequence_number).unwrap();
+        let client = validator.rest_client();
+        wait_for_account_sequence_number(&client, account, sequence_number)
+            .await
+            .unwrap();
     }
 }

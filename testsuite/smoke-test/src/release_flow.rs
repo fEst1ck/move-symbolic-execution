@@ -15,15 +15,15 @@ use diem_writeset_generator::{
 use forge::{Node, NodeExt, Swarm};
 use std::collections::BTreeMap;
 
-#[test]
-fn test_move_release_flow() {
-    let mut swarm = new_local_swarm(1);
+#[tokio::test]
+async fn test_move_release_flow() {
+    let mut swarm = new_local_swarm(1).await;
     let transaction_factory = swarm.chain_info().transaction_factory();
     let chain_id = swarm.chain_id();
     let validator = swarm.validators().next().unwrap();
     let json_rpc_endpoint = validator.json_rpc_endpoint();
     let url = json_rpc_endpoint.to_string();
-    let client = validator.json_rpc_client();
+    let client = validator.rest_client();
 
     let validator_interface = JsonRpcDebuggerInterface::new(&url).unwrap();
 
@@ -35,7 +35,7 @@ fn test_move_release_flow() {
     let release_modules = release_modules();
 
     // Execute some random transactions to make sure a new block is created.
-    let account = create_and_fund_account(&mut swarm, 100);
+    let account = create_and_fund_account(&mut swarm, 100).await;
 
     // With no artifact for TESTING, creating a release should fail.
     assert!(create_release(chain_id, url.clone(), 1, false, &release_modules, None, "").is_err());
@@ -55,10 +55,8 @@ fn test_move_release_flow() {
         .sign_with_transaction_builder(
             transaction_factory.payload(TransactionPayload::WriteSet(payload_1.clone())),
         );
-    client.submit(&txn).unwrap();
-    client
-        .wait_for_signed_transaction(&txn, None, None)
-        .unwrap();
+
+    client.submit_and_wait(&txn).await.unwrap();
 
     let latest_version = validator_interface.get_latest_version().unwrap();
     let remote_modules = validator_interface
@@ -80,8 +78,9 @@ fn test_move_release_flow() {
     swarm
         .chain_info()
         .fund(Currency::XUS, account.address(), 100)
+        .await
         .unwrap();
-    assert_balance(&client, &account, 200);
+    assert_balance(&client, &account, 200).await;
 
     let latest_version = validator_interface.get_latest_version().unwrap();
     // Now that we have artifact file checked in, we can get rid of the first_release flag
@@ -121,10 +120,7 @@ fn test_move_release_flow() {
         .sign_with_transaction_builder(
             transaction_factory.payload(TransactionPayload::WriteSet(payload_2)),
         );
-    client.submit(&txn).unwrap();
-    client
-        .wait_for_signed_transaction(&txn, None, None)
-        .unwrap();
+    client.submit_and_wait(&txn).await.unwrap();
 
     let latest_version = validator_interface.get_latest_version().unwrap();
     let remote_modules = validator_interface
@@ -133,8 +129,15 @@ fn test_move_release_flow() {
     // Assert the remote module is the same as the release modules.
 
     assert_eq!(
-        client.get_metadata().unwrap().into_inner().diem_version,
-        Some(DIEM_MAX_KNOWN_VERSION.major + 1)
+        *client
+            .get_diem_version()
+            .await
+            .unwrap()
+            .into_inner()
+            .payload
+            .major
+            .inner(),
+        DIEM_MAX_KNOWN_VERSION.major + 1
     );
 
     assert_eq!(

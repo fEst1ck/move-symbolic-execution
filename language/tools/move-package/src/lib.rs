@@ -35,28 +35,28 @@ pub struct BuildConfig {
     /// Compile in 'dev' mode. The 'dev-addresses' and 'dev-dependencies' fields will be used if
     /// this flag is set. This flag is useful for development of packages that expose named
     /// addresses that are not set to a specific value.
-    #[structopt(name = "dev-mode", short = "d", long = "dev")]
+    #[structopt(name = "dev-mode", short = "d", long = "dev", global = true)]
     pub dev_mode: bool,
 
     /// Compile in 'test' mode. The 'dev-addresses' and 'dev-dependencies' fields will be used
     /// along with any code in the 'test' directory.
-    #[structopt(name = "test-mode", short = "t", long = "test")]
+    #[structopt(name = "test-mode", long = "test", global = true)]
     pub test_mode: bool,
 
     /// Generate documentation for packages
-    #[structopt(name = "generate-docs", long = "doc")]
+    #[structopt(name = "generate-docs", long = "doc", global = true)]
     pub generate_docs: bool,
 
     /// Generate ABIs for packages
-    #[structopt(name = "generate-abis", long = "abi")]
+    #[structopt(name = "generate-abis", long = "abi", global = true)]
     pub generate_abis: bool,
 
-    /// Optional installation directory for this after it has been generated.
-    #[structopt(long = "install-dir", parse(from_os_str))]
+    /// Installation directory for compiled artifacts. Defaults to current directory.
+    #[structopt(long = "install-dir", parse(from_os_str), global = true)]
     pub install_dir: Option<PathBuf>,
 
     /// Force recompilation of all packages
-    #[structopt(name = "force-recompilation", long = "force", short = "f")]
+    #[structopt(name = "force-recompilation", long = "force", global = true)]
     pub force_recompilation: bool,
 
     /// Additional named address mapping. Useful for tools in rust
@@ -80,7 +80,11 @@ impl Default for BuildConfig {
 
 #[derive(Debug, Clone, Eq, PartialEq, PartialOrd)]
 pub struct ModelConfig {
+    /// If set, also files which are in dependent packages are considered as targets.
     pub all_files_as_targets: bool,
+    /// If set, a string how targets are filtered. A target is included if its file name
+    /// contains this string. This is similar as the `cargo test <string>` idiom.
+    pub target_filter: Option<String>,
 }
 
 impl BuildConfig {
@@ -100,7 +104,7 @@ impl BuildConfig {
         BuildPlan::create(resolved_graph)?.compile(writer)
     }
 
-    // NOTE: If there are now renamings, then the root package has the global resolution of all named
+    // NOTE: If there are no renamings, then the root package has the global resolution of all named
     // addresses in the package graph in scope. So we can simply grab all of the source files
     // across all packages and build the Move model from that.
     // TODO: In the future we will need a better way to do this to support renaming in packages

@@ -20,12 +20,13 @@ use kube::{
     api::{Api, ListParams},
     client::Client as K8sClient,
 };
-use std::{collections::HashMap, convert::TryFrom, env, process::Command, str, sync::Arc, thread};
+use std::{collections::HashMap, convert::TryFrom, env, process::Command, str, sync::Arc};
 use tokio::time::Duration;
 
 const JSON_RPC_PORT: u32 = 80;
 const REST_API_PORT: u32 = 80;
-const VALIDATOR_LB: &str = "validator-fullnode-lb";
+const VALIDATOR_LB: &str = "validator-validator-lb";
+const FULLNODES_LB: &str = "validator-fullnode-lb";
 
 pub struct K8sSwarm {
     validators: HashMap<PeerId, K8sNode>,
@@ -49,12 +50,13 @@ impl K8sSwarm {
         image_tag: &str,
         base_image_tag: &str,
         init_image_tag: &str,
+        era: &str,
     ) -> Result<Self> {
         let kube_client = create_k8s_client().await;
-        let fullnodes = HashMap::new();
         let validators = get_validators(kube_client.clone(), init_image_tag).await?;
+        let fullnodes = get_fullnodes(kube_client.clone(), init_image_tag, era).await?;
 
-        let client = validators.values().next().unwrap().json_rpc_client();
+        let client = validators.values().next().unwrap().rest_client();
         let key = load_root_key(root_key);
         let account_key = AccountKey::from_private_key(key);
         let address = diem_sdk::types::account_config::diem_root_address();
@@ -141,14 +143,11 @@ impl K8sSwarm {
     }
 }
 
+#[async_trait::async_trait]
 impl Swarm for K8sSwarm {
-    fn health_check(&mut self) -> Result<()> {
-        let unhealthy_nodes = nodes_healthcheck(Box::new(
-            self.validators
-                .values_mut()
-                .map(|v| v as &mut dyn Validator),
-        ))
-        .unwrap();
+    async fn health_check(&mut self) -> Result<()> {
+        let nodes = self.validators.values().collect();
+        let unhealthy_nodes = nodes_healthcheck(nodes).await.unwrap();
         if !unhealthy_nodes.is_empty() {
             bail!("Unhealthy nodes: {:?}", unhealthy_nodes)
         }
@@ -300,7 +299,7 @@ pub(crate) async fn get_validators(
     image_tag: &str,
 ) -> Result<HashMap<PeerId, K8sNode>> {
     let services = list_services(client).await?;
-    let mut validators = services
+    let validators = services
         .into_iter()
         .filter(|s| s.name.contains(VALIDATOR_LB))
         .map(|s| {
@@ -320,8 +319,8 @@ pub(crate) async fn get_validators(
             (node.peer_id(), node)
         })
         .collect::<HashMap<_, _>>();
-    let all_nodes = Box::new(validators.values_mut().map(|v| v as &mut dyn Validator));
-    let unhealthy_nodes = nodes_healthcheck(all_nodes).unwrap();
+    let all_nodes = validators.values().collect();
+    let unhealthy_nodes = nodes_healthcheck(all_nodes).await.unwrap();
     let mut health_nodes = HashMap::new();
     for node in validators {
         if !unhealthy_nodes.contains(&node.1.name) {
@@ -330,6 +329,36 @@ pub(crate) async fn get_validators(
     }
 
     Ok(health_nodes)
+}
+
+pub(crate) async fn get_fullnodes(
+    client: K8sClient,
+    image_tag: &str,
+    era: &str,
+) -> Result<HashMap<PeerId, K8sNode>> {
+    let services = list_services(client).await?;
+    let fullnodes = services
+        .into_iter()
+        .filter(|s| s.name.contains(FULLNODES_LB))
+        .map(|s| {
+            let node_id = parse_node_id(&s.name).expect("error to parse node id");
+            let node = K8sNode {
+                name: format!("val{}", node_id),
+                sts_name: format!("val{}-diem-validator-fullnode-e{}", node_id, era),
+                // TODO: fetch this from running node
+                peer_id: PeerId::random(),
+                node_id,
+                ip: s.host_ip.clone(),
+                port: JSON_RPC_PORT,
+                rest_api_port: REST_API_PORT,
+                dns: s.name,
+                version: Version::new(0, image_tag.to_string()),
+            };
+            (node.peer_id(), node)
+        })
+        .collect::<HashMap<_, _>>();
+
+    Ok(fullnodes)
 }
 
 fn parse_node_id(s: &str) -> Result<usize> {
@@ -349,35 +378,36 @@ fn load_tc_key(tc_key_bytes: &[u8]) -> Ed25519PrivateKey {
     Ed25519PrivateKey::try_from(tc_key_bytes).unwrap()
 }
 
-pub fn nodes_healthcheck<'a>(
-    nodes: Box<dyn Iterator<Item = &'a mut dyn Validator> + 'a>,
-) -> Result<Vec<String>> {
-    let unhealthy_nodes = nodes
-        .filter_map(|node| {
-            let node_name = node.name().to_string();
-            println!("Attempting health check: {}", node_name);
-            // perform healthcheck with retry, returning unhealthy
-            let check = diem_retrier::retry(k8s_retry_strategy(), || match node.health_check() {
-                Ok(_) => {
-                    println!("Node {} healthy", node_name);
-                    Ok(())
+pub async fn nodes_healthcheck(nodes: Vec<&K8sNode>) -> Result<Vec<String>> {
+    let mut unhealthy_nodes = vec![];
+    for node in nodes {
+        let node_name = node.name().to_string();
+        println!("Attempting health check: {}", node_name);
+        // perform healthcheck with retry, returning unhealthy
+        let check = diem_retrier::retry_async(k8s_retry_strategy(), || {
+            Box::pin(async move {
+                match node.rest_client().get_ledger_information().await {
+                    Ok(_) => {
+                        println!("Node {} healthy", node.name());
+                        Ok(())
+                    }
+                    Err(x) => {
+                        debug!("K8s Node {} unhealthy: {}", node.name(), &x);
+                        Err(x)
+                    }
                 }
-                Err(ref x) => {
-                    debug!("Node {} unhealthy: {}", node_name, x);
-                    Err(())
-                }
-            });
-            if check.is_err() {
-                return Some(node_name);
-            }
-            None
+            })
         })
-        .collect::<Vec<_>>();
+        .await;
+        if check.is_err() {
+            unhealthy_nodes.push(node_name);
+        }
+    }
     if !unhealthy_nodes.is_empty() {
         debug!("Unhealthy validators after cleanup: {:?}", unhealthy_nodes);
     }
     println!("Wait for the instance to sync up with peers");
-    thread::sleep(Duration::from_secs(20));
+    tokio::time::sleep(Duration::from_secs(20)).await;
 
     Ok(unhealthy_nodes)
 }

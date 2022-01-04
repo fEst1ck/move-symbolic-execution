@@ -6,6 +6,7 @@ use crate::{
     MoveScriptBytecode, MoveStructTag, MoveType, MoveValue, ScriptFunctionId, U64,
 };
 
+use anyhow::bail;
 use diem_crypto::{
     ed25519::{self, Ed25519PublicKey},
     multi_ed25519::{self, MultiEd25519PublicKey},
@@ -17,8 +18,7 @@ use diem_types::{
     contract_event::ContractEvent,
     transaction::{
         authenticator::{AccountAuthenticator, TransactionAuthenticator},
-        default_protocol::TransactionWithProof,
-        Script, SignedTransaction, TransactionInfoTrait,
+        Script, SignedTransaction, TransactionWithProof,
     },
 };
 
@@ -31,58 +31,60 @@ use std::{
 };
 
 #[derive(Clone, Debug)]
-pub enum TransactionData<T: TransactionInfoTrait> {
-    OnChain(TransactionOnChainData<T>),
+pub enum TransactionData {
+    OnChain(TransactionOnChainData),
     Pending(Box<SignedTransaction>),
 }
 
-impl<T: TransactionInfoTrait> From<TransactionOnChainData<T>> for TransactionData<T> {
-    fn from(txn: TransactionOnChainData<T>) -> Self {
+impl From<TransactionOnChainData> for TransactionData {
+    fn from(txn: TransactionOnChainData) -> Self {
         Self::OnChain(txn)
     }
 }
 
-impl<T: TransactionInfoTrait> From<SignedTransaction> for TransactionData<T> {
+impl From<SignedTransaction> for TransactionData {
     fn from(txn: SignedTransaction) -> Self {
         Self::Pending(Box::new(txn))
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TransactionOnChainData<T: TransactionInfoTrait> {
+pub struct TransactionOnChainData {
     pub version: u64,
     pub transaction: diem_types::transaction::Transaction,
-    pub info: T,
+    pub info: diem_types::transaction::TransactionInfo,
     pub events: Vec<ContractEvent>,
+    pub accumulator_root_hash: diem_crypto::HashValue,
 }
 
-impl From<TransactionWithProof>
-    for TransactionOnChainData<diem_types::transaction::TransactionInfo>
-{
-    fn from(txn: TransactionWithProof) -> Self {
+impl From<(TransactionWithProof, diem_crypto::HashValue)> for TransactionOnChainData {
+    fn from((txn, accumulator_root_hash): (TransactionWithProof, diem_crypto::HashValue)) -> Self {
         Self {
             version: txn.version,
             transaction: txn.transaction,
             info: txn.proof.transaction_info,
             events: txn.events.unwrap_or_default(),
+            accumulator_root_hash,
         }
     }
 }
 
-impl<T: TransactionInfoTrait>
+impl
     From<(
         u64,
         diem_types::transaction::Transaction,
-        T,
+        diem_types::transaction::TransactionInfo,
         Vec<ContractEvent>,
-    )> for TransactionOnChainData<T>
+        diem_crypto::HashValue,
+    )> for TransactionOnChainData
 {
     fn from(
-        (version, transaction, info, events): (
+        (version, transaction, info, events, accumulator_root_hash): (
             u64,
             diem_types::transaction::Transaction,
-            T,
+            diem_types::transaction::TransactionInfo,
             Vec<ContractEvent>,
+            diem_crypto::HashValue,
         ),
     ) -> Self {
         Self {
@@ -90,6 +92,7 @@ impl<T: TransactionInfoTrait>
             transaction,
             info,
             events,
+            accumulator_root_hash,
         }
     }
 }
@@ -101,6 +104,50 @@ pub enum Transaction {
     UserTransaction(Box<UserTransaction>),
     GenesisTransaction(GenesisTransaction),
     BlockMetadataTransaction(BlockMetadataTransaction),
+}
+
+impl Transaction {
+    pub fn timestamp(&self) -> u64 {
+        match self {
+            Transaction::UserTransaction(txn) => txn.timestamp.0,
+            Transaction::BlockMetadataTransaction(txn) => txn.timestamp.0,
+            Transaction::PendingTransaction(_) => 0,
+            Transaction::GenesisTransaction(_) => 0,
+        }
+    }
+
+    pub fn success(&self) -> bool {
+        match self {
+            Transaction::UserTransaction(txn) => txn.info.success,
+            Transaction::BlockMetadataTransaction(txn) => txn.info.success,
+            Transaction::PendingTransaction(_txn) => false,
+            Transaction::GenesisTransaction(txn) => txn.info.success,
+        }
+    }
+
+    pub fn is_pending(&self) -> bool {
+        matches!(self, Transaction::PendingTransaction(_))
+    }
+
+    pub fn vm_status(&self) -> String {
+        match self {
+            Transaction::UserTransaction(txn) => txn.info.vm_status.clone(),
+            Transaction::BlockMetadataTransaction(txn) => txn.info.vm_status.clone(),
+            Transaction::PendingTransaction(_txn) => "pending".to_owned(),
+            Transaction::GenesisTransaction(txn) => txn.info.vm_status.clone(),
+        }
+    }
+
+    pub fn transaction_info(&self) -> anyhow::Result<&TransactionInfo> {
+        Ok(match self {
+            Transaction::UserTransaction(txn) => &txn.info,
+            Transaction::BlockMetadataTransaction(txn) => &txn.info,
+            Transaction::PendingTransaction(_txn) => {
+                bail!("pending transaction does not have TransactionInfo")
+            }
+            Transaction::GenesisTransaction(txn) => &txn.info,
+        })
+    }
 }
 
 impl From<(SignedTransaction, TransactionPayload)> for Transaction {
@@ -118,20 +165,23 @@ impl
         TransactionInfo,
         TransactionPayload,
         Vec<Event>,
+        u64,
     )> for Transaction
 {
     fn from(
-        (txn, info, payload, events): (
+        (txn, info, payload, events, timestamp): (
             &SignedTransaction,
             TransactionInfo,
             TransactionPayload,
             Vec<Event>,
+            u64,
         ),
     ) -> Self {
         Transaction::UserTransaction(Box::new(UserTransaction {
             info,
             request: (txn, payload).into(),
             events,
+            timestamp: timestamp.into(),
         }))
     }
 }
@@ -188,6 +238,7 @@ pub struct TransactionInfo {
     pub gas_used: U64,
     pub success: bool,
     pub vm_status: String,
+    pub accumulator_root_hash: HashValue,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -204,6 +255,7 @@ pub struct UserTransaction {
     #[serde(flatten)]
     pub request: UserTransactionRequest,
     pub events: Vec<Event>,
+    pub timestamp: U64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

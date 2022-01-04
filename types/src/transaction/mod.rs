@@ -29,7 +29,7 @@ use diem_crypto_derive::{BCSCryptoHash, CryptoHasher};
 use move_core_types::transaction_argument::convert_txn_args;
 #[cfg(any(test, feature = "fuzzing"))]
 use proptest_derive::Arbitrary;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     convert::TryFrom,
@@ -679,19 +679,19 @@ impl SignedTransaction {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(any(test, feature = "fuzzing"), derive(Arbitrary))]
-pub struct TransactionWithProof<T> {
+pub struct TransactionWithProof {
     pub version: Version,
     pub transaction: Transaction,
     pub events: Option<Vec<ContractEvent>>,
-    pub proof: TransactionInfoWithProof<T>,
+    pub proof: TransactionInfoWithProof,
 }
 
-impl<T: TransactionInfoTrait> TransactionWithProof<T> {
+impl TransactionWithProof {
     pub fn new(
         version: Version,
         transaction: Transaction,
         events: Option<Vec<ContractEvent>>,
-        proof: TransactionInfoWithProof<T>,
+        proof: TransactionInfoWithProof,
     ) -> Self {
         Self {
             version,
@@ -791,6 +791,13 @@ impl TransactionStatus {
             TransactionStatus::Discard(_) => true,
             TransactionStatus::Keep(_) => false,
             TransactionStatus::Retry => true,
+        }
+    }
+
+    pub fn as_kept_status(&self) -> Result<KeptVMStatus> {
+        match self {
+            TransactionStatus::Keep(s) => Ok(s.clone()),
+            _ => Err(format_err!("Not Keep.")),
         }
     }
 }
@@ -962,95 +969,105 @@ impl TransactionOutput {
     }
 }
 
-pub trait TransactionInfoTrait:
-    Clone + CryptoHash + Debug + Display + Eq + Serialize + DeserializeOwned
-{
-    /// Constructs a new `TransactionInfo` object using transaction hash, state root hash and event
-    /// root hash.
-    fn new(
-        transaction_hash: HashValue,
-        state_root_hash: HashValue,
-        event_root_hash: HashValue,
-        gas_used: u64,
-        status: KeptVMStatus,
-    ) -> Self;
-
-    /// Returns the hash of this transaction.
-    fn transaction_hash(&self) -> HashValue;
-
-    /// Returns root hash of Sparse Merkle Tree describing the world state at the end of this
-    /// transaction.
-    fn state_root_hash(&self) -> HashValue;
-
-    /// Returns the root hash of Merkle Accumulator storing all events emitted during this
-    /// transaction.
-    fn event_root_hash(&self) -> HashValue;
-
-    /// Returns the amount of gas used by this transaction.
-    fn gas_used(&self) -> u64;
-
-    /// Resturns the Status from the VM for this transaction.
-    fn status(&self) -> &KeptVMStatus;
-}
-
 /// `TransactionInfo` is the object we store in the transaction accumulator. It consists of the
 /// transaction as well as the execution result of this transaction.
 #[derive(Clone, CryptoHasher, BCSCryptoHash, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(any(test, feature = "fuzzing"), derive(Arbitrary))]
-pub struct TransactionInfo {
-    /// The hash of this transaction.
-    transaction_hash: HashValue,
+pub enum TransactionInfo {
+    V0(TransactionInfoV0),
+}
 
-    /// The root hash of Sparse Merkle Tree describing the world state at the end of this
-    /// transaction.
-    state_root_hash: HashValue,
+impl TransactionInfo {
+    pub fn new(
+        transaction_hash: HashValue,
+        state_change_hash: HashValue,
+        event_root_hash: HashValue,
+        gas_used: u64,
+        status: KeptVMStatus,
+    ) -> Self {
+        Self::V0(TransactionInfoV0::new(
+            transaction_hash,
+            state_change_hash,
+            event_root_hash,
+            gas_used,
+            status,
+        ))
+    }
+}
 
-    /// The root hash of Merkle Accumulator storing all events emitted during this transaction.
-    event_root_hash: HashValue,
+impl Deref for TransactionInfo {
+    type Target = TransactionInfoV0;
 
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::V0(txn_info) => txn_info,
+        }
+    }
+}
+
+#[derive(Clone, CryptoHasher, BCSCryptoHash, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(any(test, feature = "fuzzing"), derive(Arbitrary))]
+pub struct TransactionInfoV0 {
     /// The amount of gas used.
     gas_used: u64,
 
     /// The vm status. If it is not `Executed`, this will provide the general error class. Execution
-    /// failures and Move abort's recieve more detailed information. But other errors are generally
+    /// failures and Move abort's receive more detailed information. But other errors are generally
     /// categorized with no status code or other information
     status: KeptVMStatus,
+
+    /// The hash of this transaction.
+    transaction_hash: HashValue,
+
+    /// The root hash of Merkle Accumulator storing all events emitted during this transaction.
+    event_root_hash: HashValue,
+
+    /// The hash value summarizing all changes caused to the world state by this transaction.
+    /// Depending on the protocol configuration, it can be the root hash of an accumulator of
+    /// the write set or all updated accounts, or the global Sparse Merkle Tree root hash.
+    state_change_hash: HashValue,
+
+    /// The root hash of the Sparse Merkle Tree describing the world state at the end of this
+    /// transaction. Depending on the protocol configuration, this can be generated periodical
+    /// only, like per block.
+    state_checkpoint_hash: Option<HashValue>,
 }
 
-impl TransactionInfoTrait for TransactionInfo {
-    fn new(
+impl TransactionInfoV0 {
+    pub fn new(
         transaction_hash: HashValue,
-        state_root_hash: HashValue,
+        state_change_hash: HashValue,
         event_root_hash: HashValue,
         gas_used: u64,
         status: KeptVMStatus,
-    ) -> TransactionInfo {
-        TransactionInfo {
-            transaction_hash,
-            state_root_hash,
-            event_root_hash,
+    ) -> Self {
+        Self {
             gas_used,
             status,
+            transaction_hash,
+            event_root_hash,
+            state_change_hash,
+            state_checkpoint_hash: None,
         }
     }
 
-    fn transaction_hash(&self) -> HashValue {
+    pub fn transaction_hash(&self) -> HashValue {
         self.transaction_hash
     }
 
-    fn state_root_hash(&self) -> HashValue {
-        self.state_root_hash
+    pub fn state_change_hash(&self) -> HashValue {
+        self.state_change_hash
     }
 
-    fn event_root_hash(&self) -> HashValue {
+    pub fn event_root_hash(&self) -> HashValue {
         self.event_root_hash
     }
 
-    fn gas_used(&self) -> u64 {
+    pub fn gas_used(&self) -> u64 {
         self.gas_used
     }
 
-    fn status(&self) -> &KeptVMStatus {
+    pub fn status(&self) -> &KeptVMStatus {
         &self.status
     }
 }
@@ -1060,7 +1077,7 @@ impl Display for TransactionInfo {
         write!(
             f,
             "TransactionInfo: [txn_hash: {}, state_root_hash: {}, event_root_hash: {}, gas_used: {}, recorded_status: {:?}]",
-            self.transaction_hash(), self.state_root_hash(), self.event_root_hash(), self.gas_used(), self.status(),
+            self.transaction_hash(), self.state_change_hash(), self.event_root_hash(), self.gas_used(), self.status(),
         )
     }
 }
@@ -1127,20 +1144,20 @@ impl TransactionToCommit {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
-pub struct TransactionListWithProof<T> {
+pub struct TransactionListWithProof {
     pub transactions: Vec<Transaction>,
     pub events: Option<Vec<Vec<ContractEvent>>>,
     pub first_transaction_version: Option<Version>,
-    pub proof: TransactionInfoListWithProof<T>,
+    pub proof: TransactionInfoListWithProof,
 }
 
-impl<T: TransactionInfoTrait> TransactionListWithProof<T> {
+impl TransactionListWithProof {
     /// Constructor.
     pub fn new(
         transactions: Vec<Transaction>,
         events: Option<Vec<Vec<ContractEvent>>>,
         first_transaction_version: Option<Version>,
-        proof: TransactionInfoListWithProof<T>,
+        proof: TransactionInfoListWithProof,
     ) -> Self {
         Self {
             transactions,
@@ -1232,17 +1249,17 @@ impl<T: TransactionInfoTrait> TransactionListWithProof<T> {
 /// requires speculative execution of each TransactionOutput to verify that the
 /// resulting state matches the expected state in the proof (for each version).
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
-pub struct TransactionOutputListWithProof<T> {
+pub struct TransactionOutputListWithProof {
     pub transactions_and_outputs: Vec<(Transaction, TransactionOutput)>,
     pub first_transaction_output_version: Option<Version>,
-    pub proof: TransactionInfoListWithProof<T>,
+    pub proof: TransactionInfoListWithProof,
 }
 
-impl<T: TransactionInfoTrait> TransactionOutputListWithProof<T> {
+impl TransactionOutputListWithProof {
     pub fn new(
         transactions_and_outputs: Vec<(Transaction, TransactionOutput)>,
         first_transaction_output_version: Option<Version>,
-        proof: TransactionInfoListWithProof<T>,
+        proof: TransactionInfoListWithProof,
     ) -> Self {
         Self {
             transactions_and_outputs,
@@ -1340,9 +1357,9 @@ impl<T: TransactionInfoTrait> TransactionOutputListWithProof<T> {
 
 /// Verifies a list of events against an expected event root hash. This is done
 /// by calculating the hash of the events using an event accumulator hasher.
-fn verify_events_against_root_hash<T: TransactionInfoTrait>(
+fn verify_events_against_root_hash(
     events: &[ContractEvent],
-    transaction_info: &T,
+    transaction_info: &TransactionInfo,
 ) -> Result<()> {
     let event_hashes: Vec<_> = events.iter().map(CryptoHash::hash).collect();
     let event_root_hash =
@@ -1361,10 +1378,10 @@ fn verify_events_against_root_hash<T: TransactionInfoTrait>(
 /// and include proofs.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[cfg_attr(any(test, feature = "fuzzing"), derive(Arbitrary))]
-pub struct AccountTransactionsWithProof<T>(pub Vec<TransactionWithProof<T>>);
+pub struct AccountTransactionsWithProof(pub Vec<TransactionWithProof>);
 
-impl<T: TransactionInfoTrait> AccountTransactionsWithProof<T> {
-    pub fn new(txns_with_proofs: Vec<TransactionWithProof<T>>) -> Self {
+impl AccountTransactionsWithProof {
+    pub fn new(txns_with_proofs: Vec<TransactionWithProof>) -> Self {
         Self(txns_with_proofs)
     }
 
@@ -1380,11 +1397,11 @@ impl<T: TransactionInfoTrait> AccountTransactionsWithProof<T> {
         self.0.len()
     }
 
-    pub fn inner(&self) -> &[TransactionWithProof<T>] {
+    pub fn inner(&self) -> &[TransactionWithProof] {
         &self.0
     }
 
-    pub fn into_inner(self) -> Vec<TransactionWithProof<T>> {
+    pub fn into_inner(self) -> Vec<TransactionWithProof> {
         self.0
     }
 
@@ -1492,15 +1509,4 @@ impl TryFrom<Transaction> for SignedTransaction {
             _ => Err(format_err!("Not a user transaction.")),
         }
     }
-}
-
-pub mod default_protocol {
-    use super::TransactionInfo;
-
-    pub type AccountTransactionsWithProof = super::AccountTransactionsWithProof<TransactionInfo>;
-    pub type TransactionInfoWithProof = super::TransactionInfoWithProof<TransactionInfo>;
-    pub type TransactionListWithProof = super::TransactionListWithProof<TransactionInfo>;
-    pub type TransactionOutputListWithProof =
-        super::TransactionOutputListWithProof<TransactionInfo>;
-    pub type TransactionWithProof = super::TransactionWithProof<TransactionInfo>;
 }

@@ -1,15 +1,10 @@
 // Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use diem_api_types::U64;
-use diem_types::{
-    account_config::ACCOUNT_MODULE_IDENTIFIER, transaction::authenticator::AuthenticationKey,
-};
-use move_core_types::{
-    identifier::IdentStr, language_storage::StructTag, move_resource::MoveStructType,
-    parser::parse_struct_tag,
-};
-use serde::{Deserialize, Deserializer};
+use diem_api_types::{Address, U64};
+use diem_types::transaction::authenticator::AuthenticationKey;
+use move_core_types::{language_storage::StructTag, parser::parse_struct_tag};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::str::FromStr;
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -70,7 +65,25 @@ pub struct DiemAccount {
     pub sequence_number: u64,
 }
 
-impl MoveStructType for DiemAccount {
-    const MODULE_NAME: &'static IdentStr = ACCOUNT_MODULE_IDENTIFIER;
-    const STRUCT_NAME: &'static IdentStr = ACCOUNT_MODULE_IDENTIFIER;
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EventHandle {
+    counter: U64,
+    guid: EventHandleGUID,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EventHandleGUID {
+    len_bytes: u8,
+    guid: GUID,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GUID {
+    id: ID,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ID {
+    creation_num: U64,
+    addr: Address,
 }

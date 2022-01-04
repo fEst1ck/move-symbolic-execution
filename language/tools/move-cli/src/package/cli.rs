@@ -9,39 +9,37 @@ use std::{
     os::unix::prelude::ExitStatusExt,
     path::{Path, PathBuf},
     process::ExitStatus,
-    time::Instant,
 };
 
 use anyhow::{bail, Result};
-use codespan_reporting::term::termcolor::{ColorChoice, StandardStream};
 
-use disassembler::disassembler::Disassembler;
 use move_command_line_common::files::{FileHash, MOVE_COVERAGE_MAP_EXTENSION};
+use move_compiler::{
+    compiled_unit::{CompiledUnit, NamedCompiledModule},
+    diagnostics::{self, codes::Severity},
+    unit_test::{plan_builder::construct_test_plan, TestPlan},
+    PASS_CFGIR,
+};
 use move_coverage::{
     coverage_map::{output_map_to_file, CoverageMap},
     format_csv_summary, format_human_summary,
     source_coverage::SourceCoverageBuilder,
     summary::summarize_inst_cov,
 };
-use move_lang::{
-    compiled_unit::{CompiledUnit, NamedCompiledModule},
-    diagnostics::{self, codes::Severity},
-    unit_test::{plan_builder::construct_test_plan, TestPlan},
-    PASS_CFGIR,
-};
+use move_disassembler::disassembler::Disassembler;
 use move_package::{
     compilation::{build_plan::BuildPlan, compiled_package::CompiledUnitWithSource},
     source_package::layout::SourcePackageLayout,
     ModelConfig,
 };
-use move_prover::run_move_prover_with_model;
 use move_unit_test::UnitTestingConfig;
 use structopt::StructOpt;
 
-use crate::NativeFunctionRecord;
+use crate::{package::prover::run_move_prover, NativeFunctionRecord};
 
 #[derive(StructOpt)]
 pub enum CoverageSummaryOptions {
+    /// Display a coverage summary for all modules in this package
     #[structopt(name = "summary")]
     Summary {
         /// Whether function coverage summaries should be displayed
@@ -50,15 +48,14 @@ pub enum CoverageSummaryOptions {
         /// Output CSV data of coverage
         #[structopt(long = "csv")]
         output_csv: bool,
-        /// Whether path coverage should be derived (default is instruction coverage)
-        #[structopt(long = "derive-path-coverage")]
-        derive_path_coverage: bool,
     },
+    /// Display coverage information about the module against source code
     #[structopt(name = "source")]
     Source {
         #[structopt(long = "module")]
         module_name: String,
     },
+    /// Display coverage information about the module against disassembled bytecode
     #[structopt(name = "bytecode")]
     Bytecode {
         #[structopt(long = "module")]
@@ -78,29 +75,44 @@ pub enum PackageCommand {
     /// Build the package at `path`. If no path is provided defaults to current directory.
     #[structopt(name = "build")]
     Build,
+    /// Print address information.
+    #[structopt(name = "info")]
+    Info,
     /// Generate error map for the package and its dependencies at `path` for use by the Move
     /// explanation tool.
     #[structopt(name = "errmap")]
     ErrMapGen {
         /// The prefix that all error reasons within modules will be prefixed with, e.g., "E" if
         /// all error reasons are "E_CANNOT_PERFORM_OPERATION", "E_CANNOT_ACCESS", etc.
+        #[structopt(long)]
         error_prefix: Option<String>,
         /// The file to serialize the generated error map to.
-        #[structopt(default_value = "error_map", parse(from_os_str))]
+        #[structopt(long, default_value = "error_map", parse(from_os_str))]
         output_file: PathBuf,
     },
     /// Run the Move Prover on the package at `path`. If no path is provided defaults to current
-    /// directory.
+    /// directory. Use `.. prove .. -- <options>` to pass on options to the prover.
     #[structopt(name = "prove")]
     Prove {
+        /// The target filter used to prune the modules to verify. Modules with a name that contains
+        /// this string will be part of verification.
+        #[structopt(short = "t", long = "target")]
+        target_filter: Option<String>,
+        /// Internal field indicating that this prover run is for a test.
+        #[structopt(skip)]
+        for_test: bool,
+        /// Any options passed to the prover.
         #[structopt(subcommand)]
-        cmd: Option<ProverOptions>,
+        options: Option<ProverOptions>,
     },
+    /// Inspect test coverage for this package. A previous test run with the `--coverage` flag must
+    /// have previously been run.
     #[structopt(name = "coverage")]
     CoverageReport {
         #[structopt(subcommand)]
         options: CoverageSummaryOptions,
     },
+    /// Run Move unit tests in this package.
     #[structopt(name = "test")]
     UnitTest {
         /// Bound the number of instructions that can be executed by any one test.
@@ -111,14 +123,13 @@ pub enum PackageCommand {
             long = "instructions"
         )]
         instruction_execution_bound: u64,
-        /// A filter string to determine which unit tests to run
+        /// A filter string to determine which unit tests to run. A unit test will be run only if it
+        /// contains this string in its fully qualified (<addr>::<module_name>::<fn_name>) name.
         #[structopt(name = "filter", short = "f", long = "filter")]
         filter: Option<String>,
-
         /// List all tests
         #[structopt(name = "list", short = "l", long = "list")]
         list: bool,
-
         /// Number of threads to use for running tests.
         #[structopt(
             name = "num_threads",
@@ -130,27 +141,24 @@ pub enum PackageCommand {
         /// Report test statistics at the end of testing
         #[structopt(name = "report_statistics", short = "s", long = "statistics")]
         report_statistics: bool,
-
         /// Show the storage state at the end of execution of a failing test
         #[structopt(name = "global_state_on_error", short = "g", long = "state_on_error")]
         report_storage_on_error: bool,
-
         /// Use the stackless bytecode interpreter to run the tests and cross check its results with
         /// the execution result from Move VM.
         #[structopt(long = "stackless")]
         check_stackless_vm: bool,
-
         /// Verbose mode
         #[structopt(long = "verbose")]
         verbose_mode: bool,
-
+        /// Collect coverage information for later use with the various `package coverage` subcommands
         #[structopt(long = "coverage")]
         compute_coverage: bool,
     },
-
+    /// Disassemble the Move bytecode pointed to
     #[structopt(name = "disassemble")]
     BytecodeView {
-        /// If set will start a disassembled bytecode-to-source explorer
+        /// Start a disassembled bytecode-to-source explorer
         #[structopt(long = "interactive")]
         interactive: bool,
         /// The package name. If not provided defaults to current package modules only
@@ -162,7 +170,7 @@ pub enum PackageCommand {
     },
 }
 
-#[derive(StructOpt)]
+#[derive(StructOpt, Debug)]
 pub enum ProverOptions {
     // Pass through unknown commands to the prover Clap parser
     #[structopt(external_subcommand)]
@@ -187,10 +195,10 @@ impl From<UnitTestResult> for ExitStatus {
 
 impl CoverageSummaryOptions {
     pub fn handle_command(&self, config: move_package::BuildConfig, path: &Path) -> Result<()> {
-        let coverage_map = CoverageMap::from_binary_file(path.join(".coverage_map.mvcov"));
+        let coverage_map = CoverageMap::from_binary_file(path.join(".coverage_map.mvcov"))?;
         let package = config.compile_package(path, &mut Vec::new())?;
         let modules: Vec<_> = package
-            .modules()
+            .modules()?
             .filter_map(|unit| match &unit.unit {
                 CompiledUnit::Module(NamedCompiledModule { module, .. }) => Some(module.clone()),
                 _ => None,
@@ -247,26 +255,40 @@ impl CoverageSummaryOptions {
 }
 
 pub fn handle_package_commands(
-    path: &Option<PathBuf>,
+    path: &Path,
     config: move_package::BuildConfig,
     cmd: &PackageCommand,
     natives: Vec<NativeFunctionRecord>,
 ) -> Result<()> {
-    let path = path
-        .as_ref()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap());
-    let rooted_path = SourcePackageLayout::try_find_root(&path);
+    // This is the exceptional command as it doesn't need a package to run, so we can't count on
+    // being able to root ourselves.
+    if let PackageCommand::New { name } = cmd {
+        let creation_path = Path::new(&path).join(name);
+        create_move_package(name, &creation_path)?;
+        return Ok(());
+    }
+
+    // Always root ourselves to the package root, and then compile relative to that.
+    let rooted_path = SourcePackageLayout::try_find_root(&path.canonicalize()?)?;
+    std::env::set_current_dir(&rooted_path).unwrap();
+
+    let rerooted_path = PathBuf::from(".");
+
     match cmd {
         PackageCommand::Build => {
-            config.compile_package(&rooted_path?, &mut std::io::stdout())?;
+            config.compile_package(&rerooted_path, &mut std::io::stdout())?;
+        }
+        PackageCommand::Info => {
+            config
+                .resolution_graph_for_package(&rerooted_path)?
+                .print_info()?;
         }
         PackageCommand::BytecodeView {
             interactive,
             package_name,
             module_or_script_name,
         } => {
-            let package = config.compile_package(&rooted_path?, &mut Vec::new())?;
+            let package = config.compile_package(&rerooted_path, &mut Vec::new())?;
             let needle_package = match package_name {
                 Some(package_name) => {
                     if package_name == package.compiled_package_info.package_name.as_str() {
@@ -308,37 +330,22 @@ pub fn handle_package_commands(
                 }
             }
         }
-        PackageCommand::New { name } => {
-            let creation_path = Path::new(&path).join(name);
-            create_move_package(name, &creation_path)?;
-        }
-        PackageCommand::Prove { cmd } => {
-            let options = match cmd {
-                None => move_prover::cli::Options::default(),
-                Some(ProverOptions::Options(options)) => {
-                    move_prover::cli::Options::create_from_args(options)?
-                }
-            };
-            println!("Starting verification ...");
-            let mut error_writer = StandardStream::stderr(ColorChoice::Auto);
-            let now = Instant::now();
-            let model = config.move_model_for_package(
-                &path,
-                ModelConfig {
-                    all_files_as_targets: false,
-                },
-            )?;
-            run_move_prover_with_model(&model, &mut error_writer, options, Some(now))?;
-            println!(
-                "Verification successful in {:.3}s",
-                now.elapsed().as_secs_f64()
-            );
+        PackageCommand::Prove {
+            target_filter,
+            for_test,
+            options,
+        } => {
+            if let Some(ProverOptions::Options(opts)) = options {
+                run_move_prover(config, &rerooted_path, target_filter, *for_test, opts)?
+            } else {
+                run_move_prover(config, &rerooted_path, target_filter, *for_test, &[])?
+            }
         }
         PackageCommand::ErrMapGen {
             error_prefix,
             output_file,
         } => {
-            let mut errmap_options = errmapgen::ErrmapOptions::default();
+            let mut errmap_options = move_errmapgen::ErrmapOptions::default();
             if let Some(err_prefix) = error_prefix {
                 errmap_options.error_prefix = err_prefix.to_string();
             }
@@ -347,12 +354,13 @@ pub fn handle_package_commands(
                 .to_string_lossy()
                 .to_string();
             let model = config.move_model_for_package(
-                &path,
+                &rerooted_path,
                 ModelConfig {
                     all_files_as_targets: true,
+                    target_filter: None,
                 },
             )?;
-            let mut errmap_gen = errmapgen::ErrmapGen::new(&model, &errmap_options);
+            let mut errmap_gen = move_errmapgen::ErrmapGen::new(&model, &errmap_options);
             errmap_gen.gen();
             errmap_gen.save_result();
         }
@@ -379,7 +387,7 @@ pub fn handle_package_commands(
                 ..UnitTestingConfig::default_with_bound(None)
             };
             let result = run_move_unit_tests(
-                &rooted_path?,
+                &rerooted_path,
                 config,
                 unit_test_config,
                 natives,
@@ -391,7 +399,10 @@ pub fn handle_package_commands(
             }
         }
         PackageCommand::CoverageReport { options } => {
-            options.handle_command(config, &rooted_path?)?;
+            options.handle_command(config, &rerooted_path)?;
+        }
+        PackageCommand::New { .. } => {
+            panic!("Hit a package new command after it should have been handled -- this should never happen")
         }
     };
     Ok(())

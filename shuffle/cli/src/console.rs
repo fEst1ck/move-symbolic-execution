@@ -1,7 +1,11 @@
 // Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{shared, shared::Network};
+use crate::{
+    context::UserContext,
+    shared,
+    shared::{Network, LATEST_USERNAME, TEST_USERNAME},
+};
 use anyhow::Result;
 use diem_types::account_address::AccountAddress;
 use std::{path::Path, process::Command};
@@ -15,14 +19,15 @@ pub fn handle(
     key_path: &Path,
     sender_address: AccountAddress,
 ) -> Result<()> {
-    shared::generate_typescript_libraries(project_path)?;
+    shared::codegen_typescript_libraries(project_path, &sender_address)?;
     let deno_bootstrap = format!(
         r#"import * as context from "{context}";
         import * as devapi from "{devapi}";
         import * as helpers from "{helpers}";
         import * as main from "{main}";
         import * as codegen from "{codegen}";
-        import * as help from "{repl_help}";"#,
+        import * as help from "{repl_help}";
+        import * as mv from "{mv}";"#,
         context = project_path
             .join(shared::MAIN_PKG_PATH)
             .join("context.ts")
@@ -46,10 +51,23 @@ pub fn handle(
         repl_help = project_path
             .join(shared::MAIN_PKG_PATH)
             .join("repl_help.ts")
+            .to_string_lossy(),
+        mv = project_path
+            .join(shared::MAIN_PKG_PATH)
+            .join("move.ts")
             .to_string_lossy()
     );
-    let filtered_envs =
-        shared::get_filtered_envs_for_deno(home, project_path, &network, key_path, sender_address)?;
+
+    let network_home = home.new_network_home(&network.get_name());
+
+    let latest_user = UserContext::new(LATEST_USERNAME, sender_address, key_path);
+    let test_user = network_home.user_context_for(TEST_USERNAME)?;
+    let filtered_envs = shared::get_filtered_envs_for_deno(
+        home,
+        project_path,
+        &network,
+        &[&latest_user, &test_user],
+    )?;
     Command::new("deno")
         .args(["repl", "--unstable", "--eval", deno_bootstrap.as_str()])
         .envs(&filtered_envs)

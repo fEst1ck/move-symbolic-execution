@@ -3,13 +3,6 @@
 
 #![forbid(unsafe_code)]
 
-mod logging;
-mod metrics;
-pub mod network;
-
-#[cfg(test)]
-mod tests;
-
 use crate::{
     logging::{LogEntry, LogSchema},
     metrics::{increment_counter, start_timer},
@@ -22,15 +15,11 @@ use diem_logger::prelude::*;
 use diem_types::{
     account_state_blob::AccountStatesChunkWithProof,
     epoch_change::EpochChangeProof,
-    protocol_spec::DpnProto,
-    transaction::{
-        default_protocol::{TransactionListWithProof, TransactionOutputListWithProof},
-        Version,
-    },
+    transaction::{TransactionListWithProof, TransactionOutputListWithProof, Version},
 };
 use futures::stream::StreamExt;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use storage_interface::DbReader;
 use storage_service_types::{
     AccountStatesChunkWithProofRequest, CompleteDataRange, DataSummary,
@@ -41,8 +30,16 @@ use storage_service_types::{
 use thiserror::Error;
 use tokio::runtime::Handle;
 
+mod logging;
+mod metrics;
+pub mod network;
+
+#[cfg(test)]
+mod tests;
+
 /// Storage server constants.
 pub const STORAGE_SERVER_VERSION: u64 = 1;
+const SUMMARY_LOG_FREQUENCY_SECS: u64 = 5;
 
 #[derive(Clone, Debug, Deserialize, Error, PartialEq, Serialize)]
 pub enum Error {
@@ -112,7 +109,7 @@ impl<T: StorageReaderInterface> StorageServiceServer<T> {
             self.bounded_executor
                 .spawn_blocking(move || {
                     let response = Handler::new(config, storage).call(protocol, request);
-                    debug!(LogSchema::new(LogEntry::SentStorageResponse).response(&response));
+                    log_storage_response(&response);
                     response_sender.send(response);
                 })
                 .await;
@@ -313,7 +310,9 @@ pub trait StorageReaderInterface: Clone + Send + 'static {
     ) -> Result<TransactionListWithProof, Error>;
 
     /// Returns a list of epoch ending ledger infos, starting at `start_epoch`
-    /// and ending at the `expected_end_epoch` (inclusive).
+    /// and ending at the `expected_end_epoch` (inclusive). For example, if
+    /// `start_epoch` is 0 and `end_epoch` is 1, this will return 2 epoch ending
+    /// ledger infos (ending epoch 0 and 1, respectively).
     fn get_epoch_ending_ledger_infos(
         &self,
         start_epoch: u64,
@@ -349,11 +348,11 @@ pub trait StorageReaderInterface: Clone + Send + 'static {
 /// storage server.
 #[derive(Clone)]
 pub struct StorageReader {
-    storage: Arc<dyn DbReader<DpnProto>>,
+    storage: Arc<dyn DbReader>,
 }
 
 impl StorageReader {
-    pub fn new(storage: Arc<dyn DbReader<DpnProto>>) -> Self {
+    pub fn new(storage: Arc<dyn DbReader>) -> Self {
         Self { storage }
     }
 
@@ -444,14 +443,17 @@ impl StorageReaderInterface for StorageReader {
 
         // Fetch the epoch ending ledger info range
         let latest_ledger_info = latest_ledger_info_with_sigs.ledger_info();
-        let latest_epoch = latest_ledger_info.epoch();
-        let epoch_ending_ledger_infos = if latest_epoch == 0 {
-            None // We haven't seen an epoch change yet
-        } else {
-            let highest_ending_epoch = latest_epoch.checked_sub(1).ok_or_else(|| {
-                Error::UnexpectedErrorEncountered("Highest ending epoch overflowed!".into())
-            })?;
+        let epoch_ending_ledger_infos = if latest_ledger_info.ends_epoch() {
+            let highest_ending_epoch = latest_ledger_info.epoch();
             Some(CompleteDataRange::from_genesis(highest_ending_epoch))
+        } else if latest_ledger_info.epoch() > 0 {
+            let highest_ending_epoch =
+                latest_ledger_info.epoch().checked_sub(1).ok_or_else(|| {
+                    Error::UnexpectedErrorEncountered("Highest ending epoch overflowed!".into())
+                })?;
+            Some(CompleteDataRange::from_genesis(highest_ending_epoch))
+        } else {
+            None // We haven't seen an epoch change yet
         };
 
         // Fetch the transaction and transaction output ranges
@@ -499,6 +501,11 @@ impl StorageReaderInterface for StorageReader {
         start_epoch: u64,
         expected_end_epoch: u64,
     ) -> Result<EpochChangeProof, Error> {
+        // The DbReader interface returns the epochs up to: `expected_end_epoch - 1`.
+        // However, we wish to fetch epoch endings up to expected_end_epoch (inclusive).
+        let expected_end_epoch = expected_end_epoch.checked_add(1).ok_or_else(|| {
+            Error::UnexpectedErrorEncountered("Expected end epoch has overflown!".into())
+        })?;
         let epoch_change_proof = self
             .storage
             .get_epoch_ending_ledger_infos(start_epoch, expected_end_epoch)
@@ -558,4 +565,32 @@ fn inclusive_range_len(start: u64, end: u64) -> Result<u64, Error> {
         .checked_add(1)
         .ok_or_else(|| Error::InvalidRequest(format!("end ({}) must not be u64::MAX", end)))?;
     Ok(len)
+}
+
+/// Logs the response sent by storage for a peer request
+fn log_storage_response(storage_response: &Result<StorageServiceResponse, StorageServiceError>) {
+    match storage_response {
+        Ok(storage_response) => {
+            let response = format!("{}", storage_response); // Use display formatting
+            if matches!(
+                storage_response,
+                StorageServiceResponse::StorageServerSummary(_)
+            ) {
+                // We expect peers to be polling our storage server summary frequently,
+                // so only log this response periodically.
+                sample!(
+                    SampleRate::Duration(Duration::from_secs(SUMMARY_LOG_FREQUENCY_SECS)),
+                    {
+                        debug!(LogSchema::new(LogEntry::SentStorageResponse).response(&response));
+                    }
+                );
+            } else {
+                debug!(LogSchema::new(LogEntry::SentStorageResponse).response(&response));
+            }
+        }
+        Err(storage_error) => {
+            let storage_error = format!("{:?}", storage_error); // Use debug formatting
+            debug!(LogSchema::new(LogEntry::SentStorageResponse).response(&storage_error));
+        }
+    };
 }

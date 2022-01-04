@@ -20,9 +20,11 @@ use diem_types::{
     account_state_blob::AccountStateBlob,
     contract_event::ContractEvent,
     on_chain_config,
-    on_chain_config::{config_address, ConfigurationResource, OnChainConfig, ValidatorSet},
+    on_chain_config::{
+        config_address, default_access_path_for_config, ConfigurationResource, OnChainConfig,
+        ValidatorSet,
+    },
     proof::SparseMerkleRangeProof,
-    protocol_spec::DpnProto,
     transaction::{
         authenticator::AuthenticationKey, ChangeSet, Transaction, TransactionPayload, Version,
         WriteSetPayload, PRE_GENESIS_VERSION,
@@ -35,17 +37,17 @@ use diem_types::{
 use diem_vm::DiemVM;
 use diemdb::{DiemDB, GetRestoreHandler};
 use executor::{
+    block_executor::BlockExecutor,
     db_bootstrapper::{generate_waypoint, maybe_bootstrap},
-    Executor,
 };
 use executor_test_helpers::{
     bootstrap_genesis, gen_ledger_info_with_sigs, get_test_signed_transaction,
 };
-use executor_types::BlockExecutor;
+use executor_types::BlockExecutorTrait;
 use move_core_types::move_resource::MoveResource;
 use rand::SeedableRng;
 use std::{convert::TryFrom, sync::Arc};
-use storage_interface::{default_protocol::DbReaderWriter, DbReader, StateSnapshotReceiver};
+use storage_interface::{DbReader, DbReaderWriter, StateSnapshotReceiver};
 
 #[test]
 fn test_empty_db() {
@@ -54,7 +56,7 @@ fn test_empty_db() {
     let tmp_dir = TempPath::new();
     let db_rw = DbReaderWriter::new(DiemDB::new_for_test(&tmp_dir));
 
-    // Executor won't be able to boot on empty db due to lack of StartupInfo.
+    // BlockExecutor won't be able to boot on empty db due to lack of StartupInfo.
     assert!(db_rw.reader.get_startup_info().unwrap().is_none());
 
     // Bootstrap empty DB.
@@ -94,7 +96,7 @@ fn execute_and_commit(txns: Vec<Transaction>, db: &DbReaderWriter, signer: &Vali
     let version = li.ledger_info().version();
     let epoch = li.ledger_info().next_block_epoch();
     let target_version = version + txns.len() as u64;
-    let executor = Executor::<DpnProto, DiemVM>::new(db.clone());
+    let executor = BlockExecutor::<DiemVM>::new(db.clone());
     let output = executor
         .execute_block((block_id, txns), executor.committed_block_id())
         .unwrap();
@@ -282,14 +284,14 @@ fn test_pre_genesis() {
 
     // DB is not empty, `maybe_bootstrap()` will try to apply and fail the waypoint check.
     assert!(maybe_bootstrap::<DiemVM>(&db_rw, &genesis_txn, waypoint).is_err());
-    // Nor is it able to boot Executor.
+    // Nor is it able to boot BlockExecutor.
     assert!(db_rw.reader.get_startup_info().unwrap().is_none());
 
     // New genesis transaction: set validator set and overwrite account1 balance
     let genesis_txn = Transaction::GenesisTransaction(WriteSetPayload::Direct(ChangeSet::new(
         WriteSetMut::new(vec![
             (
-                ValidatorSet::CONFIG_ID.access_path(),
+                default_access_path_for_config(ValidatorSet::CONFIG_ID),
                 WriteOp::Value(bcs::to_bytes(&ValidatorSet::new(vec![])).unwrap()),
             ),
             (
@@ -368,7 +370,7 @@ fn test_new_genesis() {
     let genesis_txn = Transaction::GenesisTransaction(WriteSetPayload::Direct(ChangeSet::new(
         WriteSetMut::new(vec![
             (
-                ValidatorSet::CONFIG_ID.access_path(),
+                default_access_path_for_config(ValidatorSet::CONFIG_ID),
                 WriteOp::Value(bcs::to_bytes(&ValidatorSet::new(vec![])).unwrap()),
             ),
             (

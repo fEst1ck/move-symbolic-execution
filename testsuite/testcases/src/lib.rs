@@ -7,11 +7,10 @@ pub mod gas_price_test;
 pub mod partial_nodes_down_test;
 pub mod performance_test;
 pub mod reconfiguration_test;
+pub mod state_sync_performance;
 
-use diem_sdk::{
-    client::Client as JsonRpcClient, transaction_builder::TransactionFactory, types::PeerId,
-};
-use forge::{EmitJobRequest, NetworkContext, NodeExt, Result, TxnEmitter, TxnStats, Version};
+use diem_sdk::{transaction_builder::TransactionFactory, types::PeerId};
+use forge::{NetworkContext, NodeExt, Result, TxnEmitter, TxnStats, Version};
 use rand::SeedableRng;
 use std::{
     convert::TryInto,
@@ -19,8 +18,8 @@ use std::{
 };
 use tokio::runtime::Runtime;
 
-fn batch_update<'t>(
-    ctx: &mut NetworkContext<'t>,
+async fn batch_update(
+    ctx: &mut NetworkContext<'_>,
     validators_to_update: &[PeerId],
     version: &Version,
 ) -> Result<()> {
@@ -28,13 +27,14 @@ fn batch_update<'t>(
         ctx.swarm().upgrade_validator(*validator, version)?;
     }
 
-    ctx.swarm().health_check()?;
+    ctx.swarm().health_check().await?;
     let deadline = Instant::now() + Duration::from_secs(60);
     for validator in validators_to_update {
         ctx.swarm()
             .validator_mut(*validator)
             .unwrap()
-            .wait_until_healthy(deadline)?;
+            .wait_until_healthy(deadline)
+            .await?;
     }
 
     Ok(())
@@ -53,18 +53,22 @@ pub fn generate_traffic<'t>(
         .swarm()
         .validators()
         .filter(|v| validators.contains(&v.peer_id()))
-        .map(|n| n.async_json_rpc_client())
+        .map(|n| n.rest_client())
         .collect::<Vec<_>>();
+    let mut emit_job_request = ctx.global_job.clone();
     let chain_info = ctx.swarm().chain_info();
     let transaction_factory = TransactionFactory::new(chain_info.chain_id);
     let mut emitter = TxnEmitter::new(
         chain_info.treasury_compliance_account,
         chain_info.designated_dealer_account,
-        JsonRpcClient::new(&chain_info.json_rpc_url),
+        validator_clients[0].clone(),
         transaction_factory,
         rng,
     );
-    let mut emit_job_request = EmitJobRequest::new(validator_clients).gas_price(gas_price);
+
+    emit_job_request = emit_job_request
+        .rest_clients(validator_clients)
+        .gas_price(gas_price);
     if let Some(target_tps) = fixed_tps {
         emit_job_request = emit_job_request.fixed_tps(target_tps.try_into().unwrap());
     }

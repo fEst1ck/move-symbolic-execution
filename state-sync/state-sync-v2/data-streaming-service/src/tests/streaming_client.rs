@@ -12,7 +12,7 @@ use crate::{
         GetAllTransactionsRequest, NotificationFeedback, StreamRequest, StreamingServiceListener,
         TerminateStreamRequest,
     },
-    tests::utils::initialize_logger,
+    tests::utils::{create_ledger_info, initialize_logger},
 };
 use channel::{diem_channel, message_queues::QueueStyle};
 use claim::assert_ok;
@@ -87,12 +87,12 @@ fn test_get_all_transactions() {
     // Note the request we expect to receive on the streaming service side
     let request_start_version = 101;
     let request_end_version = 200;
-    let request_max_proof_version = 300;
+    let request_proof_version = 300;
     let request_include_events = true;
     let expected_request = StreamRequest::GetAllTransactions(GetAllTransactionsRequest {
         start_version: request_start_version,
         end_version: request_end_version,
-        max_proof_version: request_max_proof_version,
+        proof_version: request_proof_version,
         include_events: request_include_events,
     });
 
@@ -103,7 +103,7 @@ fn test_get_all_transactions() {
     let response = block_on(streaming_service_client.get_all_transactions(
         request_start_version,
         request_end_version,
-        request_max_proof_version,
+        request_proof_version,
         request_include_events,
     ));
     assert_ok!(response);
@@ -118,12 +118,12 @@ fn test_get_all_transaction_outputs() {
     // Note the request we expect to receive on the streaming service side
     let request_start_version = 101;
     let request_end_version = 200;
-    let request_max_proof_version = 300;
+    let request_proof_version = 300;
     let expected_request =
         StreamRequest::GetAllTransactionOutputs(GetAllTransactionOutputsRequest {
             start_version: request_start_version,
             end_version: request_end_version,
-            max_proof_version: request_max_proof_version,
+            proof_version: request_proof_version,
         });
 
     // Spawn a new server thread to handle any transaction output stream requests
@@ -133,7 +133,7 @@ fn test_get_all_transaction_outputs() {
     let response = block_on(streaming_service_client.get_all_transaction_outputs(
         request_start_version,
         request_end_version,
-        request_max_proof_version,
+        request_proof_version,
     ));
     assert_ok!(response);
 }
@@ -148,11 +148,13 @@ fn test_continuously_stream_transactions() {
     let request_start_version = 101;
     let request_start_epoch = 2;
     let request_include_events = false;
+    let target = None;
     let expected_request =
         StreamRequest::ContinuouslyStreamTransactions(ContinuouslyStreamTransactionsRequest {
             start_version: request_start_version,
             start_epoch: request_start_epoch,
             include_events: request_include_events,
+            target: target.clone(),
         });
 
     // Spawn a new server thread to handle any continuous transaction stream requests
@@ -163,6 +165,7 @@ fn test_continuously_stream_transactions() {
         request_start_version,
         request_start_epoch,
         request_include_events,
+        target,
     ));
     assert_ok!(response);
 }
@@ -176,10 +179,12 @@ fn test_continuously_stream_transaction_outputs() {
     // Note the request we expect to receive on the streaming service side
     let request_start_version = 101;
     let request_start_epoch = 2;
+    let target = Some(create_ledger_info(1000, 10, true));
     let expected_request = StreamRequest::ContinuouslyStreamTransactionOutputs(
         ContinuouslyStreamTransactionOutputsRequest {
             start_version: request_start_version,
             start_epoch: request_start_epoch,
+            target: target.clone(),
         },
     );
 
@@ -188,8 +193,11 @@ fn test_continuously_stream_transaction_outputs() {
 
     // Send a continuous transaction output stream request and verify we get a data stream listener
     let response = block_on(
-        streaming_service_client
-            .continuously_stream_transaction_outputs(request_start_version, request_start_epoch),
+        streaming_service_client.continuously_stream_transaction_outputs(
+            request_start_version,
+            request_start_epoch,
+            target,
+        ),
     );
     assert_ok!(response);
 }

@@ -22,7 +22,6 @@ use diem_id_generator::{IdGenerator, U64IdGenerator};
 use diem_logger::prelude::*;
 use diem_types::{ledger_info::LedgerInfoWithSignatures, transaction::Version};
 use enum_dispatch::enum_dispatch;
-use itertools::Itertools;
 use std::{cmp, sync::Arc};
 
 macro_rules! invalid_client_request {
@@ -317,7 +316,7 @@ pub struct ContinuousTransactionStreamEngine {
     pub request: StreamRequest,
 
     // The target ledger info that we're currently syncing to
-    pub target_ledger_info: Option<LedgerInfoWithSignatures>,
+    pub current_target_ledger_info: Option<LedgerInfoWithSignatures>,
 
     // True iff a request has been created to fetch an epoch ending ledger info
     pub end_of_epoch_requested: bool,
@@ -329,6 +328,10 @@ pub struct ContinuousTransactionStreamEngine {
     // The next version and epoch that we're waiting to request from
     // the network. All versions before this have been requested.
     pub next_request_version_and_epoch: (Version, Epoch),
+
+    // True iff all data has been sent across the stream. This will only be
+    // possible if there is a target ledger info specified.
+    pub stream_is_complete: bool,
 }
 
 impl ContinuousTransactionStreamEngine {
@@ -337,19 +340,21 @@ impl ContinuousTransactionStreamEngine {
             StreamRequest::ContinuouslyStreamTransactions(request) => {
                 Ok(ContinuousTransactionStreamEngine {
                     request: stream_request.clone(),
-                    target_ledger_info: None,
+                    current_target_ledger_info: None,
                     end_of_epoch_requested: false,
                     next_stream_version_and_epoch: (request.start_version, request.start_epoch),
                     next_request_version_and_epoch: (request.start_version, request.start_epoch),
+                    stream_is_complete: false,
                 })
             }
             StreamRequest::ContinuouslyStreamTransactionOutputs(request) => {
                 Ok(ContinuousTransactionStreamEngine {
                     request: stream_request.clone(),
-                    target_ledger_info: None,
+                    current_target_ledger_info: None,
                     end_of_epoch_requested: false,
                     next_stream_version_and_epoch: (request.start_version, request.start_epoch),
                     next_request_version_and_epoch: (request.start_version, request.start_epoch),
+                    stream_is_complete: false,
                 })
             }
             request => invalid_stream_request!(request),
@@ -360,7 +365,23 @@ impl ContinuousTransactionStreamEngine {
         &self,
         advertised_data: &AdvertisedData,
     ) -> Result<LedgerInfoWithSignatures, Error> {
-        if let Some(highest_synced_ledger_info) = highest_synced_ledger_info(advertised_data) {
+        // Check if the stream has a final target ledger info
+        match &self.request {
+            StreamRequest::ContinuouslyStreamTransactions(request) => {
+                if let Some(target) = &request.target {
+                    return Ok(target.clone());
+                }
+            }
+            StreamRequest::ContinuouslyStreamTransactionOutputs(request) => {
+                if let Some(target) = &request.target {
+                    return Ok(target.clone());
+                }
+            }
+            request => invalid_stream_request!(request),
+        };
+
+        // We don't have a final target, select the highest to make progress
+        if let Some(highest_synced_ledger_info) = advertised_data.highest_synced_ledger_info() {
             let (next_request_version, _) = self.next_request_version_and_epoch;
             if next_request_version > highest_synced_ledger_info.ledger_info().version() {
                 Err(Error::NoDataToFetch(
@@ -377,9 +398,9 @@ impl ContinuousTransactionStreamEngine {
     }
 
     fn get_target_ledger_info(&self) -> &LedgerInfoWithSignatures {
-        self.target_ledger_info
+        self.current_target_ledger_info
             .as_ref()
-            .expect("No target ledger info found!")
+            .expect("No current target ledger info found!")
     }
 
     fn create_data_notification(
@@ -397,7 +418,7 @@ impl ContinuousTransactionStreamEngine {
 
         // Update the target ledger info if we've hit it
         if request_end_version == self.get_target_ledger_info().ledger_info().version() {
-            self.target_ledger_info = None;
+            self.current_target_ledger_info = None;
         }
 
         Ok(data_notification)
@@ -414,6 +435,25 @@ impl ContinuousTransactionStreamEngine {
             request_start_version,
             request_end_version,
         );
+
+        // Check if the stream is now complete
+        match &self.request {
+            StreamRequest::ContinuouslyStreamTransactions(request) => {
+                if let Some(target) = &request.target {
+                    if request_end_version == target.ledger_info().version() {
+                        self.stream_is_complete = true;
+                    }
+                }
+            }
+            StreamRequest::ContinuouslyStreamTransactionOutputs(request) => {
+                if let Some(target) = &request.target {
+                    if request_end_version == target.ledger_info().version() {
+                        self.stream_is_complete = true;
+                    }
+                }
+            }
+            request => invalid_stream_request!(request),
+        };
 
         // Update the next stream version and epoch
         if request_end_version == self.get_target_ledger_info().ledger_info().version()
@@ -492,13 +532,13 @@ impl DataStreamEngine for ContinuousTransactionStreamEngine {
         max_number_of_requests: u64,
         global_data_summary: &GlobalDataSummary,
     ) -> Result<Vec<DataClientRequest>, Error> {
-        if self.target_ledger_info.is_none() && self.end_of_epoch_requested {
+        if self.current_target_ledger_info.is_none() && self.end_of_epoch_requested {
             return Ok(vec![]); // We are waiting for the epoch ending ledger info
         }
 
         // If we don't have a syncing target, select one.
         let (next_request_version, next_request_epoch) = self.next_request_version_and_epoch;
-        if self.target_ledger_info.is_none() {
+        if self.current_target_ledger_info.is_none() {
             // Select a new ledger info from the advertised data
             let target_ledger_info =
                 self.select_target_ledger_info(&global_data_summary.advertised_data)?;
@@ -529,7 +569,7 @@ impl DataStreamEngine for ContinuousTransactionStreamEngine {
                             target_ledger_info.ledger_info().epoch()
                         )))
                 );
-                self.target_ledger_info = Some(target_ledger_info);
+                self.current_target_ledger_info = Some(target_ledger_info);
             }
         }
 
@@ -574,7 +614,7 @@ impl DataStreamEngine for ContinuousTransactionStreamEngine {
             request => invalid_stream_request!(request),
         };
 
-        // Verify we can satisfy the next transaction version
+        // Verify we can satisfy the next version
         let (next_request_version, _) = self.next_request_version_and_epoch;
         AdvertisedData::contains_range(
             next_request_version,
@@ -584,7 +624,7 @@ impl DataStreamEngine for ContinuousTransactionStreamEngine {
     }
 
     fn is_stream_complete(&self) -> bool {
-        false // This stream type should never be complete!
+        self.stream_is_complete
     }
 
     fn transform_client_response_into_notification(
@@ -610,7 +650,7 @@ impl DataStreamEngine for ContinuousTransactionStreamEngine {
                                         target_ledger_info.ledger_info().version()
                                     )))
                             );
-                            self.target_ledger_info = Some(target_ledger_info.clone());
+                            self.current_target_ledger_info = Some(target_ledger_info.clone());
                         }
                         response_payload => {
                             // TODO(joshlind): notify the data client of the bad response
@@ -695,29 +735,18 @@ impl EpochEndingStreamEngine {
         request: &GetAllEpochEndingLedgerInfosRequest,
         advertised_data: &AdvertisedData,
     ) -> Result<Self, Error> {
-        let end_epoch = match most_common_highest_epoch(advertised_data) {
-            Some(max_advertised_epoch) => {
-                if max_advertised_epoch == 0 {
-                    return Err(Error::NoDataToFetch(
-                        "The maximum advertised epoch is 0. No epoch changes have occurred!".into(),
-                    ));
-                } else {
-                    max_advertised_epoch.checked_sub(1).ok_or_else(|| {
-                        Error::IntegerOverflow("Maximum advertised epoch has underflow!".into())
-                    })?
-                }
-            }
-            None => {
-                return Err(Error::DataIsUnavailable(format!(
-                    "Unable to find any maximum advertised epoch in the network: {:?}",
+        let end_epoch = advertised_data
+            .highest_epoch_ending_ledger_info()
+            .ok_or_else(|| {
+                Error::DataIsUnavailable(format!(
+                    "Unable to find any epoch ending ledger info in the network: {:?}",
                     advertised_data
-                )));
-            }
-        };
+                ))
+            })?;
 
         if end_epoch < request.start_epoch {
             return Err(Error::DataIsUnavailable(format!(
-                "The epoch to start syncing from is higher than any advertised highest epoch! Highest: {:?}, start: {:?}",
+                "The epoch to start syncing from is higher than the highest epoch ending ledger info! Highest: {:?}, start: {:?}",
                 end_epoch, request.start_epoch
             )));
         }
@@ -725,7 +754,7 @@ impl EpochEndingStreamEngine {
             (LogSchema::new(LogEntry::ReceivedDataResponse)
                 .event(LogEvent::Success)
                 .message(&format!(
-                    "Setting the end epoch for the stream at: {:?}",
+                    "Setting the highest epoch ending ledger info for the stream at: {:?}",
                     end_epoch
                 )))
         );
@@ -1123,7 +1152,7 @@ fn create_data_client_request(
                     DataClientRequest::TransactionsWithProof(TransactionsWithProofRequest {
                         start_version: start_index,
                         end_version: end_index,
-                        max_proof_version: target_ledger_info_version,
+                        proof_version: target_ledger_info_version,
                         include_events: request.include_events,
                     })
                 }
@@ -1132,7 +1161,7 @@ fn create_data_client_request(
                         TransactionOutputsWithProofRequest {
                             start_version: start_index,
                             end_version: end_index,
-                            max_proof_version: target_ledger_info_version,
+                            proof_version: target_ledger_info_version,
                         },
                     )
                 }
@@ -1150,7 +1179,7 @@ fn create_data_client_request(
                 DataClientRequest::TransactionsWithProof(TransactionsWithProofRequest {
                     start_version: start_index,
                     end_version: end_index,
-                    max_proof_version: request.max_proof_version,
+                    proof_version: request.proof_version,
                     include_events: request.include_events,
                 })
             }
@@ -1158,50 +1187,11 @@ fn create_data_client_request(
                 DataClientRequest::TransactionOutputsWithProof(TransactionOutputsWithProofRequest {
                     start_version: start_index,
                     end_version: end_index,
-                    max_proof_version: request.max_proof_version,
+                    proof_version: request.proof_version,
                 })
             }
             request => invalid_stream_request!(request),
         },
-    }
-}
-
-/// Returns the most common highest epoch advertised in the network.
-/// Note: we use this to reduce the likelihood of malicious nodes
-/// interfering with syncing progress by advertising non-existent epochs.
-fn most_common_highest_epoch(advertised_data: &AdvertisedData) -> Option<Epoch> {
-    // Count the frequencies of the highest epochs
-    let highest_epoch_frequencies = advertised_data
-        .epoch_ending_ledger_infos
-        .iter()
-        .map(|epoch_range| epoch_range.highest())
-        .clone()
-        .counts();
-
-    // Return the most common epoch
-    highest_epoch_frequencies
-        .into_iter()
-        .max_by_key(|(_, count)| *count)
-        .map(|(epoch, _)| epoch)
-}
-
-/// Returns the highest synced ledger info advertised in the network
-fn highest_synced_ledger_info(
-    advertised_data: &AdvertisedData,
-) -> Option<LedgerInfoWithSignatures> {
-    let highest_synced_position = advertised_data
-        .synced_ledger_infos
-        .iter()
-        .map(|ledger_info_with_sigs| ledger_info_with_sigs.ledger_info().version())
-        .position_max();
-
-    if let Some(highest_synced_position) = highest_synced_position {
-        advertised_data
-            .synced_ledger_infos
-            .get(highest_synced_position)
-            .cloned()
-    } else {
-        None
     }
 }
 

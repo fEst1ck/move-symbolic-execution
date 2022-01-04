@@ -2,34 +2,32 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use diem_crypto::hash::HashValue;
-use diem_types::{
-    protocol_spec::DpnProto,
-    transaction::{Transaction, Version},
-};
+use diem_types::transaction::{Transaction, Version};
 use diem_vm::DiemVM;
-use executor::Executor;
-use executor_types::BlockExecutor;
+use executor::block_executor::BlockExecutor;
+use executor_types::BlockExecutorTrait;
 use std::{
     sync::{mpsc, Arc},
     time::{Duration, Instant},
 };
 
 pub struct TransactionExecutor {
-    executor: Arc<Executor<DpnProto, DiemVM>>,
+    executor: Arc<BlockExecutor<DiemVM>>,
     parent_block_id: HashValue,
     start_time: Instant,
     version: Version,
     // If commit_sender is `None`, we will commit all the execution result immediately in this struct.
-    commit_sender: Option<mpsc::Sender<(HashValue, HashValue, Instant, Instant, Duration, usize)>>,
+    commit_sender:
+        Option<mpsc::SyncSender<(HashValue, HashValue, Instant, Instant, Duration, usize)>>,
 }
 
 impl TransactionExecutor {
     pub fn new(
-        executor: Arc<Executor<DpnProto, DiemVM>>,
+        executor: Arc<BlockExecutor<DiemVM>>,
         parent_block_id: HashValue,
         version: Version,
         commit_sender: Option<
-            mpsc::Sender<(HashValue, HashValue, Instant, Instant, Duration, usize)>,
+            mpsc::SyncSender<(HashValue, HashValue, Instant, Instant, Duration, usize)>,
         >,
     ) -> Self {
         Self {

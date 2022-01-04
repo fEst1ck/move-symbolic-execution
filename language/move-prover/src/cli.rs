@@ -7,26 +7,29 @@
 
 use std::{
     collections::BTreeMap,
+    str::FromStr,
     sync::atomic::{AtomicBool, Ordering},
 };
 
 use anyhow::anyhow;
 use clap::{App, Arg};
 use log::LevelFilter;
-use move_lang::shared::NumericalAddress;
+use move_compiler::shared::NumericalAddress;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use simplelog::{
     CombinedLogger, Config, ConfigBuilder, LevelPadding, SimpleLogger, TermLogger, TerminalMode,
 };
 
-use abigen::AbigenOptions;
-use boogie_backend::options::{BoogieOptions, VectorTheory};
-use bytecode::options::{AutoTraceLevel, ProverOptions};
 use codespan_reporting::diagnostic::Severity;
-use docgen::DocgenOptions;
-use errmapgen::ErrmapOptions;
-use move_model::{model::VerificationScope, options::ModelBuilderOptions};
+use move_abigen::AbigenOptions;
+use move_docgen::DocgenOptions;
+use move_errmapgen::ErrmapOptions;
+use move_model::{
+    model::VerificationScope, options::ModelBuilderOptions, simplifier::SimplificationPass,
+};
+use move_prover_boogie_backend::options::{BoogieOptions, VectorTheory};
+use move_stackless_bytecode::options::{AutoTraceLevel, ProverOptions};
 
 /// Atomic used to prevent re-initialization of logging.
 static LOGGER_CONFIGURED: AtomicBool = AtomicBool::new(false);
@@ -66,7 +69,10 @@ pub struct Options {
     pub move_named_address_values: Vec<String>,
     /// Whether to run experimental pipeline
     pub experimental_pipeline: bool,
-    /// BEGIN OF STRUCTURED OPTIONS
+    /// Options for printing out modules and functions reachable by script functions
+    pub script_reach: bool,
+
+    /// BEGIN OF STRUCTURED OPTIONS. DO NOT ADD VALUE FIELDS AFTER THIS
     /// Options for the model builder.
     pub model_builder: ModelBuilderOptions,
     /// Options for the documentation generator.
@@ -81,8 +87,6 @@ pub struct Options {
     /// TODO: this currently create errors during deserialization, so skip them for this.
     #[serde(skip_serializing)]
     pub errmapgen: ErrmapOptions,
-    /// Options for printing out modules and functions reachable by script functions
-    pub script_reach: bool,
 }
 
 impl Default for Options {
@@ -97,15 +101,7 @@ impl Default for Options {
             verbosity_level: LevelFilter::Info,
             move_sources: vec![],
             move_deps: vec![],
-            move_named_address_values: vec![
-                // TODO: Remove this and this field when package support has landed
-                "Std=0x1".into(),
-                "DiemFramework=0x1".into(),
-                "DiemRoot=0xA550C18".into(),
-                "CurrencyInfo=0xA550C18".into(),
-                "TreasuryCompliance=0xB1E55ED".into(),
-                "VMReserved=0x0".into(),
-            ],
+            move_named_address_values: vec![],
             model_builder: ModelBuilderOptions::default(),
             prover: ProverOptions::default(),
             backend: BoogieOptions::default(),
@@ -151,7 +147,6 @@ impl Options {
                     .long("config")
                     .takes_value(true)
                     .value_name("TOML_FILE")
-                    .env("MOVE_PROVER_CONFIG")
                     .help("path to a configuration file. \
                      Values in this file will be overridden by command line flags"),
             )
@@ -276,6 +271,15 @@ impl Options {
                     .long("ignore-pragma-opaque-internal-only")
                     .help("Ignore the \"opaque\" pragma on specs of \
                     internal functions when possible"),
+            )
+            .arg(
+                Arg::with_name("simplification-pipeline")
+                    .long("simplify")
+                    .takes_value(true)
+                    .multiple(true)
+                    .number_of_values(1)
+                    .help("Specify one simplification pass to run on the specifications. \
+                    This option May be specified multiple times to compose a pipeline")
             )
             .arg(
                 Arg::with_name("docgen")
@@ -461,9 +465,9 @@ impl Options {
                      be non-deterministic, and may do other things to keep output stable.")
             )
             .arg(
-                Arg::with_name("use-cvc4")
-                    .long("use-cvc4")
-                    .help("uses cvc4 solver instead of z3")
+                Arg::with_name("use-cvc5")
+                    .long("use-cvc5")
+                    .help("uses cvc5 solver instead of z3")
             )
             .arg(
                 Arg::with_name("use-exp-boogie")
@@ -549,7 +553,12 @@ impl Options {
                        configuration file instead."
                 ));
             }
-            Self::create_from_toml_file(matches.value_of("config").unwrap())?
+            let value = matches.value_of("config").unwrap();
+            if value.is_empty() {
+                Self::default()
+            } else {
+                Self::create_from_toml_file(matches.value_of("config").unwrap())?
+            }
         } else if matches.is_present("config-str") {
             Self::create_from_toml(matches.value_of("config-str").unwrap())?
         } else {
@@ -647,6 +656,13 @@ impl Options {
         if matches.is_present("ignore-pragma-opaque-internal-only") {
             options.model_builder.ignore_pragma_opaque_internal_only = true;
         }
+        if matches.occurrences_of("simplification-pipeline") > 0 {
+            for name in get_vec("simplification-pipeline") {
+                let pass = SimplificationPass::from_str(&name)
+                    .map_err(|e| anyhow!("Unknown simplification pass: {}", e))?;
+                options.model_builder.simplification_pipeline.push(pass);
+            }
+        }
         if matches.is_present("docgen") {
             options.run_docgen = true;
         }
@@ -723,8 +739,8 @@ impl Options {
                 .unwrap()
                 .parse::<usize>()?;
         }
-        if matches.is_present("use-cvc4") {
-            options.backend.use_cvc4 = true;
+        if matches.is_present("use-cvc5") {
+            options.backend.use_cvc5 = true;
         }
         if matches.is_present("use-exp-boogie") {
             options.backend.use_exp_boogie = true;
@@ -771,6 +787,12 @@ impl Options {
     /// Sets up logging based on provided options. This should be called as early as possible
     /// and before any use of info!, warn! etc.
     pub fn setup_logging(&self) {
+        if LOGGER_CONFIGURED
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
         let config = ConfigBuilder::new()
             .set_time_level(LevelFilter::Debug)
             .set_level_padding(LevelPadding::Off)
@@ -788,7 +810,6 @@ impl Options {
     }
 
     pub fn setup_logging_for_test(&self) {
-        // Loggers are global static, so we have to protect against reinitializing.
         if LOGGER_CONFIGURED
             .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
             .is_err()
@@ -803,6 +824,11 @@ impl Options {
     /// Convenience function to enable debugging (like high verbosity) on this instance.
     pub fn enable_debug(&mut self) {
         self.verbosity_level = LevelFilter::Debug;
+    }
+
+    /// Convenience function to set verbosity level to only show errors and warnings.
+    pub fn set_quiet(&mut self) {
+        self.verbosity_level = LevelFilter::Warn
     }
 }
 

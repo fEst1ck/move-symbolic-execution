@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{options::ModuleGeneratorOptions, padding::Pad, utils::random_string};
-use bytecode_verifier::verify_module;
-use ir_to_bytecode::compiler::compile_module;
 use move_binary_format::file_format::CompiledModule;
+use move_bytecode_verifier::verify_module;
 use move_core_types::account_address::AccountAddress;
+use move_ir_to_bytecode::compiler::compile_module;
 use move_ir_types::{ast::*, location::*};
 use move_symbol_pool::Symbol;
 use rand::{rngs::StdRng, Rng};
@@ -246,11 +246,12 @@ impl<'a> ModuleGenerator<'a> {
             signature,
             body: FunctionBody::Move {
                 locals,
-                code: Block_ {
-                    stmts: VecDeque::from(vec![Statement::CommandStatement(
-                        Spanned::unsafe_no_loc(Cmd_::return_empty()),
+                code: vec![Spanned::unsafe_no_loc(Block_ {
+                    label: Spanned::unsafe_no_loc(BlockLabel_(Symbol::from("b0"))),
+                    statements: VecDeque::from(vec![Spanned::unsafe_no_loc(
+                        Statement_::return_empty(),
                     )]),
-                },
+                })],
             },
         };
         let fun_name = FunctionName(self.identifier().into());

@@ -62,13 +62,8 @@ use diem_logger::prelude::*;
 use diem_types::{
     account_address::AccountAddress,
     account_state::AccountState,
-    account_state_blob::{
-        default_protocol::AccountStateWithProof, AccountStateBlob, AccountStatesChunkWithProof,
-    },
-    contract_event::{
-        default_protocol::{EventByVersionWithProof, EventWithProof},
-        ContractEvent,
-    },
+    account_state_blob::{AccountStateBlob, AccountStateWithProof, AccountStatesChunkWithProof},
+    contract_event::{ContractEvent, EventByVersionWithProof, EventWithProof},
     epoch_change::EpochChangeProof,
     event::EventKey,
     ledger_info::LedgerInfoWithSignatures,
@@ -76,14 +71,10 @@ use diem_types::{
         AccountStateProof, AccumulatorConsistencyProof, EventProof, SparseMerkleProof,
         TransactionInfoListWithProof,
     },
-    protocol_spec::DpnProto,
     state_proof::StateProof,
     transaction::{
-        default_protocol::{
-            AccountTransactionsWithProof, TransactionListWithProof, TransactionOutputListWithProof,
-            TransactionWithProof,
-        },
-        TransactionInfo, TransactionInfoTrait, TransactionOutput, TransactionToCommit, Version,
+        AccountTransactionsWithProof, TransactionInfo, TransactionListWithProof, TransactionOutput,
+        TransactionOutputListWithProof, TransactionToCommit, TransactionWithProof, Version,
         PRE_GENESIS_VERSION,
     },
 };
@@ -107,7 +98,7 @@ use storage_interface::{
     DbReader, DbWriter, MoveDbReader, Order, StartupInfo, StateSnapshotReceiver, TreeState,
 };
 
-const MAX_LIMIT: u64 = 1000;
+const MAX_LIMIT: u64 = 5000;
 
 // TODO: Either implement an iteration API to allow a very old client to loop through a long history
 // or guarantee that there is always a recent enough waypoint and client knows to boot from there.
@@ -578,60 +569,74 @@ impl DiemDB {
         let last_version = first_version + txns_to_commit.len() as u64 - 1;
 
         // Account state updates. Gather account state root hashes
-        let account_state_sets = txns_to_commit
-            .iter()
-            .map(|txn_to_commit| txn_to_commit.account_states().clone())
-            .collect::<Vec<_>>();
+        let state_root_hashes = {
+            let _timer = DIEM_STORAGE_OTHER_TIMERS_SECONDS
+                .with_label_values(&["save_transactions_state"])
+                .start_timer();
 
-        let node_hashes = txns_to_commit
-            .iter()
-            .map(|txn_to_commit| txn_to_commit.jf_node_hashes())
-            .collect::<Option<Vec<_>>>();
-        let state_root_hashes = self.state_store.put_account_state_sets(
-            account_state_sets,
-            node_hashes,
-            first_version,
-            &mut cs,
-        )?;
+            let account_state_sets = txns_to_commit
+                .iter()
+                .map(|txn_to_commit| txn_to_commit.account_states().clone())
+                .collect::<Vec<_>>();
+
+            let node_hashes = txns_to_commit
+                .iter()
+                .map(|txn_to_commit| txn_to_commit.jf_node_hashes())
+                .collect::<Option<Vec<_>>>();
+            self.state_store.put_account_state_sets(
+                account_state_sets,
+                node_hashes,
+                first_version,
+                &mut cs,
+            )?
+        };
 
         // Event updates. Gather event accumulator root hashes.
-        let event_root_hashes = zip_eq(first_version..=last_version, txns_to_commit)
-            .map(|(ver, txn_to_commit)| {
-                self.event_store
-                    .put_events(ver, txn_to_commit.events(), &mut cs)
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let event_root_hashes = {
+            let _timer = DIEM_STORAGE_OTHER_TIMERS_SECONDS
+                .with_label_values(&["save_transactions_events"])
+                .start_timer();
+            zip_eq(first_version..=last_version, txns_to_commit)
+                .map(|(ver, txn_to_commit)| {
+                    self.event_store
+                        .put_events(ver, txn_to_commit.events(), &mut cs)
+                })
+                .collect::<Result<Vec<_>>>()?
+        };
 
-        zip_eq(first_version..=last_version, txns_to_commit).try_for_each(
-            |(ver, txn_to_commit)| {
-                // Transaction updates. Gather transaction hashes.
-                self.transaction_store.put_transaction(
-                    ver,
-                    txn_to_commit.transaction(),
-                    &mut cs,
-                )?;
-                self.transaction_store
-                    .put_write_set(ver, txn_to_commit.write_set(), &mut cs)
-            },
-        )?;
+        let new_root_hash = {
+            let _timer = DIEM_STORAGE_OTHER_TIMERS_SECONDS
+                .with_label_values(&["save_transactions_txn_infos"])
+                .start_timer();
+            zip_eq(first_version..=last_version, txns_to_commit).try_for_each(
+                |(ver, txn_to_commit)| {
+                    // Transaction updates. Gather transaction hashes.
+                    self.transaction_store.put_transaction(
+                        ver,
+                        txn_to_commit.transaction(),
+                        &mut cs,
+                    )?;
+                    self.transaction_store
+                        .put_write_set(ver, txn_to_commit.write_set(), &mut cs)
+                },
+            )?;
+            // Transaction accumulator updates. Get result root hash.
+            let txn_infos = izip!(txns_to_commit, state_root_hashes, event_root_hashes)
+                .map(|(t, s, e)| {
+                    Ok(TransactionInfo::new(
+                        t.transaction().hash(),
+                        s,
+                        e,
+                        t.gas_used(),
+                        t.status().clone(),
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            assert_eq!(txn_infos.len(), txns_to_commit.len());
 
-        // Transaction accumulator updates. Get result root hash.
-        let txn_infos = izip!(txns_to_commit, state_root_hashes, event_root_hashes)
-            .map(|(t, s, e)| {
-                Ok(TransactionInfo::new(
-                    t.transaction().hash(),
-                    s,
-                    e,
-                    t.gas_used(),
-                    t.status().clone(),
-                ))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        assert_eq!(txn_infos.len(), txns_to_commit.len());
-
-        let new_root_hash =
             self.ledger_store
-                .put_transaction_infos(first_version, &txn_infos, &mut cs)?;
+                .put_transaction_infos(first_version, &txn_infos, &mut cs)?
+        };
 
         Ok(new_root_hash)
     }
@@ -652,7 +657,7 @@ impl DiemDB {
     }
 }
 
-impl DbReader<DpnProto> for DiemDB {
+impl DbReader for DiemDB {
     fn get_epoch_ending_ledger_infos(
         &self,
         start_epoch: u64,
@@ -1030,7 +1035,7 @@ impl DbReader<DpnProto> for DiemDB {
     fn get_latest_state_root(&self) -> Result<(Version, HashValue)> {
         gauged_api("get_latest_state_root", || {
             let (version, txn_info) = self.ledger_store.get_latest_transaction_info()?;
-            Ok((version, txn_info.state_root_hash()))
+            Ok((version, txn_info.state_change_hash()))
         })
     }
 
@@ -1246,9 +1251,9 @@ impl ResourceResolver for DiemDB {
     }
 }
 
-impl MoveDbReader<DpnProto> for DiemDB {}
+impl MoveDbReader for DiemDB {}
 
-impl DbWriter<DpnProto> for DiemDB {
+impl DbWriter for DiemDB {
     /// `first_version` is the version of the first transaction in `txns_to_commit`.
     /// When `ledger_info_with_sigs` is provided, verify that the transaction accumulator root hash
     /// it carries is generated after the `txns_to_commit` are applied.

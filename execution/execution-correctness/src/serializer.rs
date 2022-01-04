@@ -5,7 +5,7 @@ use crate::execution_correctness::ExecutionCorrectness;
 use consensus_types::{block::Block, vote_proposal::VoteProposal};
 use diem_crypto::{ed25519::Ed25519PrivateKey, traits::SigningKey, HashValue};
 use diem_types::ledger_info::LedgerInfoWithSignatures;
-use executor_types::{BlockExecutor, Error, StateComputeResult};
+use executor_types::{BlockExecutorTrait, Error, StateComputeResult};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -18,12 +18,12 @@ pub enum ExecutionCorrectnessInput {
 }
 
 pub struct SerializerService {
-    internal: Box<dyn BlockExecutor>,
+    internal: Box<dyn BlockExecutorTrait>,
     prikey: Option<Ed25519PrivateKey>,
 }
 
 impl SerializerService {
-    pub fn new(internal: Box<dyn BlockExecutor>, prikey: Option<Ed25519PrivateKey>) -> Self {
+    pub fn new(internal: Box<dyn BlockExecutorTrait>, prikey: Option<Ed25519PrivateKey>) -> Self {
         Self { internal, prikey }
     }
 
@@ -32,7 +32,7 @@ impl SerializerService {
 
         let output = match input {
             ExecutionCorrectnessInput::CommittedBlockId => {
-                bcs::to_bytes(&self.internal.committed_block_id())
+                bcs::to_bytes(&Result::<_, Error>::Ok(self.internal.committed_block_id()))
             }
             ExecutionCorrectnessInput::Reset => bcs::to_bytes(&self.internal.reset()),
             ExecutionCorrectnessInput::ExecuteBlock(block_with_parent_id) => bcs::to_bytes(

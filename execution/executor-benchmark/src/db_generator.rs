@@ -3,6 +3,7 @@
 
 use crate::{
     transaction_executor::TransactionExecutor, transaction_generator::TransactionGenerator,
+    TransactionCommitter,
 };
 use diem_config::{config::RocksdbConfig, utils::get_genesis_txn};
 use diem_jellyfish_merkle::metrics::{
@@ -14,10 +15,10 @@ use diemdb::{
     metrics::DIEM_STORAGE_ROCKSDB_PROPERTIES, schema::JELLYFISH_MERKLE_NODE_CF_NAME, DiemDB,
 };
 use executor::{
+    block_executor::BlockExecutor,
     db_bootstrapper::{generate_waypoint, maybe_bootstrap},
-    Executor,
 };
-use indicatif::{ProgressBar, ProgressStyle};
+use executor_types::BlockExecutorTrait;
 use std::{
     fs,
     path::Path,
@@ -57,18 +58,14 @@ pub fn run(
     let waypoint = generate_waypoint::<DiemVM>(&db_rw, get_genesis_txn(&config).unwrap()).unwrap();
     maybe_bootstrap::<DiemVM>(&db_rw, get_genesis_txn(&config).unwrap(), waypoint).unwrap();
 
-    let executor = Arc::new(Executor::new(db_rw));
+    let executor = Arc::new(BlockExecutor::new(db_rw));
+    let executor_2 = executor.clone();
     let genesis_block_id = executor.committed_block_id();
-    let (block_sender, block_receiver) = mpsc::sync_channel(50 /* bound */);
+    let (block_sender, block_receiver) = mpsc::sync_channel(3 /* bound */);
+    let (commit_sender, commit_receiver) = mpsc::sync_channel(3 /* bound */);
 
     // Set a progressing bar
-    let bar = Arc::new(ProgressBar::new(num_accounts as u64 * 2));
-    bar.set_style(
-        ProgressStyle::default_bar().template("[{elapsed}] {bar:100.cyan/blue} {percent}%"),
-    );
-    let exe_thread_bar = Arc::clone(&bar);
-
-    // Spawn two threads to run transaction generator and executor separately.
+    // Spawn threads to run transaction generator, executor and committer separately.
     let gen_thread = std::thread::Builder::new()
         .name("txn_generator".to_string())
         .spawn(move || {
@@ -85,25 +82,29 @@ pub fn run(
                 executor,
                 genesis_block_id,
                 0, /* start_verison */
-                None,
+                Some(commit_sender),
             );
             while let Ok(transactions) = block_receiver.recv() {
-                let version_bump = transactions.len() as u64;
                 exe.execute_block(transactions);
-                exe_thread_bar.inc(version_bump);
             }
         })
         .expect("Failed to spawn transaction executor thread.");
+    let commit_thread = std::thread::Builder::new()
+        .name("txn_committer".to_string())
+        .spawn(move || {
+            let mut committer = TransactionCommitter::new(executor_2, 0, commit_receiver);
+            committer.run();
+        })
+        .expect("Failed to spawn transaction committer thread.");
 
     // Wait for generator to finish.
     let mut generator = gen_thread.join().unwrap();
     generator.drop_sender();
     // Wait until all transactions are committed.
     exe_thread.join().unwrap();
+    commit_thread.join().unwrap();
     // Do a sanity check on the sequence number to make sure all transactions are committed.
     generator.verify_sequence_number(db.as_ref());
-
-    bar.finish();
 
     let final_version = generator.version();
     // Write metadata

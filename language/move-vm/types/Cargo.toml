@@ -18,9 +18,9 @@ serde = { version = "1.0.124", features = ["derive", "rc"] }
 smallvec = "1.6.1"
 
 bcs = "0.1.2"
-diem-workspace-hack = { path = "../../../common/workspace-hack" }
 move-core-types = { path = "../../move-core/types" }
 move-binary-format = { path = "../../move-binary-format" }
+diem-workspace-hack = { version = "0.1", path = "../../../crates/diem-workspace-hack" }
 
 [dev-dependencies]
 proptest = "1.0.0"

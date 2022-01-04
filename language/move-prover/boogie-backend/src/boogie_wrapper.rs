@@ -15,7 +15,6 @@ use once_cell::sync::Lazy;
 use pretty::RcDoc;
 use regex::Regex;
 
-use bytecode::function_target_pipeline::{FunctionTargetsHolder, FunctionVariant};
 use move_binary_format::file_format::FunctionDefinitionIndex;
 use move_model::{
     ast::TempIndex,
@@ -23,6 +22,7 @@ use move_model::{
     model::{FunId, GlobalEnv, Loc, ModuleId, NodeId, QualifiedId, StructId},
     ty::{PrimitiveType, Type},
 };
+use move_stackless_bytecode::function_target_pipeline::{FunctionTargetsHolder, FunctionVariant};
 
 // DEBUG
 // use backtrace::Backtrace;
@@ -163,13 +163,13 @@ impl<'env> BoogieWrapper<'env> {
         {
             return Err(anyhow!(
                 "The configured prover `{}` could not be found{}",
-                if self.options.use_cvc4 {
-                    &self.options.cvc4_exe
+                if self.options.use_cvc5 {
+                    &self.options.cvc5_exe
                 } else {
                     &self.options.z3_exe
                 },
-                if self.options.use_cvc4 {
-                    " (--use-cvc4 is set)"
+                if self.options.use_cvc5 {
+                    " (--use-cvc5 is set)"
                 } else {
                     ""
                 }

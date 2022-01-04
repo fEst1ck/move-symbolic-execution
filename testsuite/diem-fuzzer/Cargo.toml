@@ -25,8 +25,8 @@ rand = "0.8.3"
 ureq = { version = "1.5.4", features = ["json", "native-tls"], default-features = false }
 
 bcs = "0.1.2"
-diem-proptest-helpers = { path = "../../common/proptest-helpers" }
-diem-workspace-hack = { path = "../../common/workspace-hack" }
+diem-proptest-helpers = { path = "../../crates/diem-proptest-helpers" }
+diem-workspace-hack = { version = "0.1", path = "../../crates/diem-workspace-hack" }
 
 # List out modules with data structures being fuzzed here.
 accumulator = { path = "../../storage/accumulator", features = ["fuzzing"] }
@@ -34,7 +34,7 @@ consensus = { path = "../../consensus", features = ["fuzzing"] }
 consensus-types = { path = "../../consensus/consensus-types", features = ["fuzzing"] }
 executor = { path = "../../execution/executor", features = ["fuzzing"] }
 executor-types = { path = "../../execution/executor-types", features = ["fuzzing"] }
-language-e2e-tests = { path = "../../language/testing-infra/e2e-tests" }
+language-e2e-tests = { path = "../../diem-move/e2e-tests" }
 diem-crypto = { path = "../../crates/diem-crypto", features = ["fuzzing"]}
 diem-jellyfish-merkle = { path = "../../storage/jellyfish-merkle", features = ["fuzzing"] }
 diem-json-rpc = { path = "../../json-rpc", features = ["fuzzing"] }

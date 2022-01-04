@@ -17,7 +17,7 @@ module DiemFramework::Genesis {
     use DiemFramework::DiemSystem;
     use DiemFramework::DiemTimestamp;
     use DiemFramework::DiemTransactionPublishingOption;
-    use DiemFramework::DiemVersion;
+    use ExperimentalFramework::ExperimentalVersion;
     use DiemFramework::TransactionFee;
     use DiemFramework::DiemVMConfig;
     use DiemFramework::ParallelExecutionConfig;
@@ -94,7 +94,7 @@ module DiemFramework::Genesis {
         TransactionFee::initialize(tc_account);
 
         DiemSystem::initialize_validator_set(dr_account);
-        DiemVersion::initialize(dr_account, initial_diem_version);
+        ExperimentalVersion::initialize(dr_account, initial_diem_version);
         DualAttestation::initialize(dr_account);
         DiemBlock::initialize_block_metadata(dr_account);
 

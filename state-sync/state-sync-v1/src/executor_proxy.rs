@@ -10,11 +10,10 @@ use crate::{
 use diem_logger::prelude::*;
 use diem_types::{
     contract_event::ContractEvent, ledger_info::LedgerInfoWithSignatures,
-    move_resource::MoveStorage, protocol_spec::DpnProto,
-    transaction::default_protocol::TransactionListWithProof,
+    move_resource::MoveStorage, transaction::TransactionListWithProof,
 };
 use event_notifications::{EventNotificationSender, EventSubscriptionService};
-use executor_types::{ChunkExecutor, ExecutedTrees};
+use executor_types::{ChunkExecutorTrait, ExecutedTrees};
 use std::sync::Arc;
 use storage_interface::DbReader;
 
@@ -53,27 +52,27 @@ pub trait ExecutorProxyTrait: Send {
     fn publish_event_notifications(&mut self, events: Vec<ContractEvent>) -> Result<(), Error>;
 }
 
-pub(crate) struct ExecutorProxy {
-    storage: Arc<dyn DbReader<DpnProto>>,
-    executor: Box<dyn ChunkExecutor>,
+pub(crate) struct ExecutorProxy<C> {
+    storage: Arc<dyn DbReader>,
+    chunk_executor: Arc<C>,
     event_subscription_service: EventSubscriptionService,
 }
 
-impl ExecutorProxy {
+impl<C: ChunkExecutorTrait> ExecutorProxy<C> {
     pub(crate) fn new(
-        storage: Arc<dyn DbReader<DpnProto>>,
-        executor: Box<dyn ChunkExecutor>,
+        storage: Arc<dyn DbReader>,
+        chunk_executor: Arc<C>,
         event_subscription_service: EventSubscriptionService,
     ) -> Self {
         Self {
             storage,
-            executor,
+            chunk_executor,
             event_subscription_service,
         }
     }
 }
 
-impl ExecutorProxyTrait for ExecutorProxy {
+impl<C: ChunkExecutorTrait> ExecutorProxyTrait for ExecutorProxy<C> {
     fn get_local_storage_state(&self) -> Result<SyncState, Error> {
         let storage_info = self.storage.get_startup_info().map_err(|error| {
             Error::UnexpectedError(format!(
@@ -106,12 +105,12 @@ impl ExecutorProxyTrait for ExecutorProxy {
     ) -> Result<(), Error> {
         // track chunk execution time
         let timer = counters::EXECUTE_CHUNK_DURATION.start_timer();
-        let events = self
-            .executor
+        let (events, _) = self
+            .chunk_executor
             .execute_and_commit_chunk(
                 txn_list_with_proof,
-                verified_target_li,
-                intermediate_end_of_epoch_li,
+                &verified_target_li,
+                intermediate_end_of_epoch_li.as_ref(),
             )
             .map_err(|error| {
                 Error::UnexpectedError(format!("Execute and commit chunk failed: {}", error))
@@ -235,11 +234,11 @@ mod tests {
     use diem_vm::DiemVM;
     use diemdb::DiemDB;
     use event_notifications::{EventSubscriptionService, ReconfigNotificationListener};
-    use executor::Executor;
+    use executor::{block_executor::BlockExecutor, chunk_executor::ChunkExecutor};
     use executor_test_helpers::{
         bootstrap_genesis, gen_block_id, gen_ledger_info_with_sigs, get_test_signed_transaction,
     };
-    use executor_types::BlockExecutor;
+    use executor_types::BlockExecutorTrait;
     use futures::{future::FutureExt, stream::StreamExt};
     use move_core_types::language_storage::TypeTag;
     use serde::{Deserialize, Serialize};
@@ -378,7 +377,7 @@ mod tests {
             .unwrap();
 
         // Create an executor proxy
-        let chunk_executor = Box::new(Executor::<DpnProto, DiemVM>::new(db_rw));
+        let chunk_executor = Arc::new(ChunkExecutor::<DiemVM>::new(db_rw).unwrap());
         let mut executor_proxy = ExecutorProxy::new(db, chunk_executor, event_subscription_service);
 
         // Publish a subscribed event
@@ -573,14 +572,14 @@ mod tests {
 
         // Initialize the configs and verify that the node doesn't panic
         // (even though it can't find the TestOnChainConfig on the blockchain!).
-        let storage: Arc<dyn DbReader<DpnProto>> = db.clone();
+        let storage: Arc<dyn DbReader> = db.clone();
         let synced_version = (&*storage).fetch_synced_version().unwrap();
         event_subscription_service
             .notify_initial_configs(synced_version)
             .unwrap();
 
         // Create an executor
-        let chunk_executor = Box::new(Executor::<DpnProto, DiemVM>::new(db_rw.clone()));
+        let chunk_executor = Arc::new(ChunkExecutor::<DiemVM>::new(db_rw.clone()).unwrap());
         let mut executor_proxy = ExecutorProxy::new(db, chunk_executor, event_subscription_service);
 
         // Verify that the initial configs returned to the subscriber don't contain the unknown on-chain config
@@ -598,7 +597,7 @@ mod tests {
         let allowlist_txn = create_new_update_consensus_config_transaction(0);
 
         // Execute and commit the reconfig block
-        let mut block_executor = Box::new(Executor::<DpnProto, DiemVM>::new(db_rw));
+        let mut block_executor = Box::new(BlockExecutor::<DiemVM>::new(db_rw));
         let block = vec![dummy_txn, allowlist_txn];
         let (reconfig_events, _) = execute_and_commit_block(&mut block_executor, block, 1);
 
@@ -622,8 +621,8 @@ mod tests {
         verify_initial_config: bool,
     ) -> (
         Vec<TestValidator>,
-        Box<Executor<DpnProto, DiemVM>>,
-        ExecutorProxy,
+        Box<BlockExecutor<DiemVM>>,
+        ExecutorProxy<ChunkExecutor<DiemVM>>,
         ReconfigNotificationListener,
     ) {
         // Generate a genesis change set
@@ -646,7 +645,7 @@ mod tests {
         let mut reconfig_receiver = event_subscription_service
             .subscribe_to_reconfigurations()
             .unwrap();
-        let storage: Arc<dyn DbReader<DpnProto>> = db.clone();
+        let storage: Arc<dyn DbReader> = db.clone();
         let synced_version = (&*storage).fetch_synced_version().unwrap();
         assert_ok!(event_subscription_service.notify_initial_configs(synced_version));
 
@@ -662,8 +661,8 @@ mod tests {
         }
 
         // Create the executors
-        let block_executor = Box::new(Executor::<DpnProto, DiemVM>::new(db_rw.clone()));
-        let chunk_executor = Box::new(Executor::<DpnProto, DiemVM>::new(db_rw));
+        let block_executor = Box::new(BlockExecutor::<DiemVM>::new(db_rw.clone()));
+        let chunk_executor = Arc::new(ChunkExecutor::<DiemVM>::new(db_rw).unwrap());
         let executor_proxy = ExecutorProxy::new(db, chunk_executor, event_subscription_service);
 
         (
@@ -769,7 +768,7 @@ mod tests {
 
     /// Executes and commits a given block that will cause a reconfiguration event.
     fn execute_and_commit_block(
-        block_executor: &mut Box<Executor<DpnProto, DiemVM>>,
+        block_executor: &mut Box<BlockExecutor<DiemVM>>,
         block: Vec<Transaction>,
         block_id: u8,
     ) -> (Vec<ContractEvent>, LedgerInfoWithSignatures) {

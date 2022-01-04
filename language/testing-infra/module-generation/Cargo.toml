@@ -12,13 +12,13 @@ edition = "2018"
 [dependencies]
 rand = "0.8.3"
 
-bytecode-verifier = { path = "../../bytecode-verifier" }
-ir-to-bytecode = { path = "../../move-ir-compiler/ir-to-bytecode" }
+move-bytecode-verifier = { path = "../../move-bytecode-verifier" }
+move-ir-to-bytecode = { path = "../../move-ir-compiler/move-ir-to-bytecode" }
 move-core-types = { path = "../../move-core/types" }
 move-ir-types = { path = "../../move-ir/types" }
-diem-workspace-hack = { path = "../../../common/workspace-hack" }
 move-binary-format = { path = "../../move-binary-format" }
 move-symbol-pool = { path = "../../move-symbol-pool" }
+diem-workspace-hack = { version = "0.1", path = "../../../crates/diem-workspace-hack" }
 
 [features]
 default = []

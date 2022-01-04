@@ -7,11 +7,10 @@ edition = "2018"
 license = "Apache-2.0"
 
 [dependencies]
-diem-workspace-hack = { path = "../../../../common/workspace-hack" }
 
 # move dependencies
-bytecode = { path = "../../bytecode" }
-move-lang = { path = "../../../move-lang" }
+move-stackless-bytecode = { path = "../../bytecode" }
+move-compiler = { path = "../../../move-compiler" }
 move-model = { path = "../../../move-model" }
 move-prover = { path = "../.." }
 
@@ -20,3 +19,4 @@ anyhow = "1.0.38"
 itertools = "0.10.1"
 pretty = "0.10.0"
 structopt = "0.3.21"
+diem-workspace-hack = { version = "0.1", path = "../../../../crates/diem-workspace-hack" }

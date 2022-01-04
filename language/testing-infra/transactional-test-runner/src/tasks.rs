@@ -3,8 +3,9 @@
 
 #![forbid(unsafe_code)]
 
-use anyhow::*;
+use anyhow::{anyhow, bail, Result};
 use move_command_line_common::files::{MOVE_EXTENSION, MOVE_IR_EXTENSION};
+use move_compiler::shared::NumericalAddress;
 use move_core_types::{
     account_address::AccountAddress,
     identifier::Identifier,
@@ -12,7 +13,6 @@ use move_core_types::{
     parser,
     transaction_argument::TransactionArgument,
 };
-use move_lang::shared::NumericalAddress;
 use std::{fmt::Debug, path::Path, str::FromStr};
 use structopt::*;
 use tempfile::NamedTempFile;
@@ -24,7 +24,7 @@ pub enum RawAddress {
 }
 
 fn parse_address_literal(s: &str) -> Result<AccountAddress> {
-    let (number, _number_format) = move_lang::shared::parse_u128(s)
+    let (number, _number_format) = move_compiler::shared::parse_u128(s)
         .map_err(|e| anyhow!("Failed to parse address. Got error: {}", e))?;
 
     Ok(AccountAddress::new(number.to_be_bytes()))
@@ -218,11 +218,27 @@ pub enum SyntaxChoice {
     IR,
 }
 
+/// When printing bytecode, the input program must either be a script or a module.
+#[derive(Debug)]
+pub enum PrintBytecodeInputChoice {
+    Script,
+    Module,
+}
+
+/// Translates the given Move IR module or script into bytecode, then prints a textual
+/// representation of that bytecode.
+#[derive(Debug, StructOpt)]
+pub struct PrintBytecodeCommand {
+    /// The kind of input: either a script, or a module.
+    #[structopt(long = "input", default_value = "script")]
+    pub input: PrintBytecodeInputChoice,
+}
+
 #[derive(Debug, StructOpt)]
 pub struct InitCommand {
     #[structopt(
         long = "addresses",
-        parse(try_from_str = move_lang::shared::parse_named_address)
+        parse(try_from_str = move_compiler::shared::parse_named_address)
     )]
     pub named_addresses: Vec<(String, NumericalAddress)>,
 }
@@ -235,12 +251,20 @@ pub struct PublishCommand {
     pub syntax: Option<SyntaxChoice>,
 }
 
+/// TODO: this is a hack to support named addresses in transaction argument positions.
+/// Should reimplement in a better way in the future.
+#[derive(Debug)]
+pub enum Argument {
+    NamedAddress(Identifier),
+    TransactionArgument(TransactionArgument),
+}
+
 #[derive(Debug, StructOpt)]
 pub struct RunCommand {
     #[structopt(long = "signers", parse(try_from_str = RawAddress::parse))]
     pub signers: Vec<RawAddress>,
-    #[structopt(long = "args", parse(try_from_str = parser::parse_transaction_argument))]
-    pub args: Vec<TransactionArgument>,
+    #[structopt(long = "args", parse(try_from_str = parse_argument))]
+    pub args: Vec<Argument>,
     #[structopt(long = "type-args", parse(try_from_str = parser::parse_type_tag))]
     pub type_args: Vec<TypeTag>,
     #[structopt(long = "gas-budget")]
@@ -262,6 +286,7 @@ pub struct ViewCommand {
 #[derive(Debug)]
 pub enum TaskCommand<ExtraInitArgs, ExtraPublishArgs, ExtraRunArgs, SubCommands> {
     Init(InitCommand, ExtraInitArgs),
+    PrintBytecode(PrintBytecodeCommand),
     Publish(PublishCommand, ExtraPublishArgs),
     Run(RunCommand, ExtraRunArgs),
     View(ViewCommand),
@@ -299,6 +324,8 @@ where
             ExtraInitArgs::augment_clap(subcommand)
         });
 
+        let app = app.subcommand(PrintBytecodeCommand::clap().name("print-bytecode"));
+
         let app = app.subcommand({
             let subcommand = PublishCommand::clap().name("publish");
             ExtraPublishArgs::augment_clap(subcommand)
@@ -317,6 +344,9 @@ where
         match matches.subcommand() {
             ("init", Some(matches)) => {
                 TaskCommand::Init(StructOpt::from_clap(matches), StructOpt::from_clap(matches))
+            }
+            ("print-bytecode", Some(matches)) => {
+                TaskCommand::PrintBytecode(StructOpt::from_clap(matches))
             }
             ("publish", Some(matches)) => {
                 TaskCommand::Publish(StructOpt::from_clap(matches), StructOpt::from_clap(matches))
@@ -372,4 +402,25 @@ impl FromStr for SyntaxChoice {
             )),
         }
     }
+}
+
+impl FromStr for PrintBytecodeInputChoice {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "script" => Ok(PrintBytecodeInputChoice::Script),
+            "module" => Ok(PrintBytecodeInputChoice::Module),
+            _ => Err(anyhow!(
+                "Invalid input choice. Expected 'script' or 'module'"
+            )),
+        }
+    }
+}
+
+fn parse_argument(s: &str) -> Result<Argument> {
+    Ok(match s.strip_prefix('@') {
+        Some(stripped) => Argument::NamedAddress(Identifier::new(stripped)?),
+        None => Argument::TransactionArgument(parser::parse_transaction_argument(s)?),
+    })
 }

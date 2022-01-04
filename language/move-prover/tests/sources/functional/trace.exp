@@ -1,8 +1,8 @@
-Move prover returns: exiting with boogie verification errors
+Move prover returns: exiting with verification errors
 error: post-condition does not hold
-   ┌─ tests/sources/functional/trace.move:17:9
+   ┌─ tests/sources/functional/trace.move:18:9
    │
-17 │         ensures result == a + b;
+18 │         ensures result == a + b;
    │         ^^^^^^^^^^^^^^^^^^^^^^^^
    │
    = Related Bindings:
@@ -10,19 +10,34 @@ error: post-condition does not hold
    =         b = <redacted>
    =         result = <redacted>
    = Execution Trace:
-   =     at tests/sources/functional/trace.move:13: add_invalid
+   =     at tests/sources/functional/trace.move:14: add_invalid
    =         a = <redacted>
    =         b = <redacted>
-   =     at tests/sources/functional/trace.move:14: add_invalid
-   =         result = <redacted>
    =     at tests/sources/functional/trace.move:15: add_invalid
-   =     at tests/sources/functional/trace.move:17: add_invalid (spec)
+   =         result = <redacted>
+   =     at tests/sources/functional/trace.move:16: add_invalid
+   =     at tests/sources/functional/trace.move:18: add_invalid (spec)
    =         `ensures result == a + b;` = <redacted>
 
-error: post-condition does not hold
-   ┌─ tests/sources/functional/trace.move:32:9
+error: global memory invariant does not hold
+   ┌─ tests/sources/functional/trace.move:37:5
    │
-32 │         ensures exists<R>(addr) ==> global<R>(addr).x == x;
+37 │     invariant forall addr: address: exists<R>(addr) ==> global<R>(addr).x < 5;
+   │     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   │
+   =     at tests/sources/functional/trace.move:28: publish_invalid
+   =     at tests/sources/functional/trace.move:32: publish_invalid (spec)
+   =         `let addr = Signer::address_of(s);` = <redacted>
+   =     at tests/sources/functional/trace.move:28: publish_invalid
+   =         s = <redacted>
+   =         x = <redacted>
+   =     at tests/sources/functional/trace.move:29: publish_invalid
+   =     at tests/sources/functional/trace.move:37
+
+error: post-condition does not hold
+   ┌─ tests/sources/functional/trace.move:33:9
+   │
+33 │         ensures exists<R>(addr) ==> global<R>(addr).x == x;
    │         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    │
    = Related Bindings:
@@ -31,21 +46,22 @@ error: post-condition does not hold
    =         global<R>(addr) = <redacted>
    =         x = <redacted>
    = Execution Trace:
-   =     at tests/sources/functional/trace.move:27: publish_invalid
-   =     at tests/sources/functional/trace.move:31: publish_invalid (spec)
+   =     at tests/sources/functional/trace.move:28: publish_invalid
+   =     at tests/sources/functional/trace.move:32: publish_invalid (spec)
    =         `let addr = Signer::address_of(s);` = <redacted>
-   =     at tests/sources/functional/trace.move:27: publish_invalid
+   =     at tests/sources/functional/trace.move:28: publish_invalid
    =         s = <redacted>
    =         x = <redacted>
-   =     at tests/sources/functional/trace.move:28: publish_invalid
    =     at tests/sources/functional/trace.move:29: publish_invalid
-   =     at tests/sources/functional/trace.move:32: publish_invalid (spec)
+   =     at tests/sources/functional/trace.move:37
+   =     at tests/sources/functional/trace.move:30: publish_invalid
+   =     at tests/sources/functional/trace.move:33: publish_invalid (spec)
    =         `ensures exists<R>(addr) ==> global<R>(addr).x == x;` = <redacted>
 
 error: post-condition does not hold
-   ┌─ tests/sources/functional/trace.move:24:9
+   ┌─ tests/sources/functional/trace.move:25:9
    │
-24 │         ensures a == old(a) + b;
+25 │         ensures a == old(a) + b;
    │         ^^^^^^^^^^^^^^^^^^^^^^^^
    │
    = Related Bindings:
@@ -53,11 +69,11 @@ error: post-condition does not hold
    =         b = <redacted>
    =         old(a) = <redacted>
    = Execution Trace:
-   =     at tests/sources/functional/trace.move:20: update_invalid
-   =         a = <redacted>
-   =         b = <redacted>
    =     at tests/sources/functional/trace.move:21: update_invalid
    =         a = <redacted>
+   =         b = <redacted>
    =     at tests/sources/functional/trace.move:22: update_invalid
-   =     at tests/sources/functional/trace.move:24: update_invalid (spec)
+   =         a = <redacted>
+   =     at tests/sources/functional/trace.move:23: update_invalid
+   =     at tests/sources/functional/trace.move:25: update_invalid (spec)
    =         `ensures a == old(a) + b;` = <redacted>

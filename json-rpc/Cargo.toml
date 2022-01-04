@@ -20,9 +20,6 @@ rand = "0.8.3"
 serde_json = "1.0.64"
 serde = { version = "1.0.124", features = ["derive"], default-features = false }
 tokio = { version = "1.8.1", features = ["full"] }
-tokio-retry = "0.3.0"
-tokio-stream = "0.1.4"
-tokio-tungstenite = "0.14.0"
 warp = { version = "0.3.0", features = ["default", "tls", "tokio-rustls", "tokio-tungstenite", "websocket"] }
 reqwest = { version = "0.11.2", features = ["blocking", "json"], default_features = false, optional = true }
 proptest = { version = "1.0.0", optional = true }
@@ -34,22 +31,22 @@ diem-client = { path = "../crates/diem-client", optional = true }
 diem-config = { path = "../config" }
 diem-crypto = { path = "../crates/diem-crypto" }
 diemdb = { path = "../storage/diemdb", optional = true }
-diem-id-generator = { path = "../common/id-generator" }
+diem-id-generator = { path = "../crates/diem-id-generator" }
 diem-json-rpc-types = { path = "./types", package = "diem-json-rpc-types" }
-diem-infallible = { path = "../common/infallible" }
-diem-logger = { path = "../common/logger" }
+diem-infallible = { path = "../crates/diem-infallible" }
+diem-logger = { path = "../crates/diem-logger" }
 diem-mempool = { path = "../mempool" }
-diem-metrics = { path = "../common/metrics" }
-diem-proptest-helpers = { path = "../common/proptest-helpers", optional = true }
+diem-metrics = { path = "../crates/diem-metrics" }
+diem-proptest-helpers = { path = "../crates/diem-proptest-helpers", optional = true }
 diem-types = { path = "../types" }
-diem-temppath = { path = "../common/temppath", optional = true }
-diem-workspace-hack = { path = "../common/workspace-hack" }
+diem-temppath = { path = "../crates/diem-temppath", optional = true }
+diem-workspace-hack = { version = "0.1", path = "../crates/diem-workspace-hack" }
 executor = { path = "../execution/executor" , optional = true}
 executor-types = { path = "../execution/executor-types" , optional = true}
 move-core-types = { path = "../language/move-core/types" }
 move-vm-types = { path = "../language/move-vm/types", optional = true }
 network = { path = "../network" }
-resource-viewer = { path = "../language/tools/resource-viewer" }
+move-resource-viewer = { path = "../language/tools/move-resource-viewer" }
 scratchpad = { path = "../storage/scratchpad", optional = true }
 storage-interface = { path = "../storage/storage-interface" }
 thiserror = "1.0.24"
@@ -65,19 +62,19 @@ diemdb = { path = "../storage/diemdb", features = ["fuzzing"] }
 diem-genesis-tool = {path = "../config/management/genesis", features = ["testing"] }
 diem-client = { path = "../crates/diem-client" }
 diem-mempool = { path = "../mempool", features = ["fuzzing"] }
-diem-proptest-helpers = { path = "../common/proptest-helpers" }
-diem-temppath = { path = "../common/temppath" }
+diem-proptest-helpers = { path = "../crates/diem-proptest-helpers" }
+diem-temppath = { path = "../crates/diem-temppath" }
 diem-types = { path = "../types", features = ["fuzzing"] }
 vm-validator = { path = "../vm-validator" }
 diem-framework-releases= { path = "../diem-move/diem-framework/DPN/releases" }
 vm-genesis = { path = "../diem-move/vm-genesis" }
 executor = { path = "../execution/executor" }
 executor-types = { path = "../execution/executor-types" }
-scratchpad = { path = "../storage/scratchpad" }
 move-vm-types = { path = "../language/move-vm/types" }
 diem-transaction-builder = { path = "../sdk/transaction-builder" }
 diem-sdk = { path = "../sdk" }
+scratchpad = { path = "../storage/scratchpad", features = ["fuzzing"] }
 
 [features]
-fuzzing = ["proptest", "diem-client", "diem-mempool/fuzzing", "diemdb/fuzzing", "diem-proptest-helpers", "diem-temppath", "executor", "executor-types", "move-vm-types", "reqwest", "scratchpad", "vm-genesis"]
+fuzzing = ["proptest", "diem-client", "diem-mempool/fuzzing", "diemdb/fuzzing", "diem-proptest-helpers", "diem-temppath", "executor", "executor-types", "move-vm-types", "reqwest", "scratchpad/fuzzing", "vm-genesis"]
 failpoints = ["fail/failpoints"]

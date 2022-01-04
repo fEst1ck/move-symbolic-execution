@@ -1,8 +1,8 @@
 // Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{Factory, Result, Swarm, Version};
-use anyhow::Context;
+use crate::{Factory, GenesisConfig, Result, Swarm, Version};
+use anyhow::{bail, Context};
 use rand::rngs::StdRng;
 use std::{
     collections::HashMap,
@@ -124,15 +124,20 @@ impl LocalFactory {
         Self::with_revision_and_workspace(&merge_base)
     }
 
-    pub fn new_swarm<R>(&self, rng: R, number_of_validators: NonZeroUsize) -> Result<LocalSwarm>
+    pub async fn new_swarm<R>(
+        &self,
+        rng: R,
+        number_of_validators: NonZeroUsize,
+    ) -> Result<LocalSwarm>
     where
         R: ::rand::RngCore + ::rand::CryptoRng,
     {
         let version = self.versions.keys().max().unwrap();
         self.new_swarm_with_version(rng, number_of_validators, version, None)
+            .await
     }
 
-    pub fn new_swarm_with_version<R>(
+    pub async fn new_swarm_with_version<R>(
         &self,
         rng: R,
         number_of_validators: NonZeroUsize,
@@ -152,31 +157,39 @@ impl LocalFactory {
         let mut swarm = builder.build(rng)?;
         swarm
             .launch()
+            .await
             .with_context(|| format!("Swarm logs can be found here: {}", swarm.logs_location()))?;
 
         Ok(swarm)
     }
 }
 
+#[async_trait::async_trait]
 impl Factory for LocalFactory {
     fn versions<'a>(&'a self) -> Box<dyn Iterator<Item = Version> + 'a> {
         Box::new(self.versions.keys().cloned())
     }
 
-    fn launch_swarm(
+    async fn launch_swarm(
         &self,
         rng: &mut StdRng,
         node_num: NonZeroUsize,
         version: &Version,
         _genesis_version: &Version,
-        genesis_modules: Option<&[Vec<u8>]>,
+        genesis_config: Option<&GenesisConfig>,
     ) -> Result<Box<dyn Swarm>> {
-        let swarm = self.new_swarm_with_version(
-            rng,
-            node_num,
-            version,
-            genesis_modules.map(|m| m.to_owned()),
-        )?;
+        let genesis_modules = match genesis_config {
+            Some(config) => match config {
+                GenesisConfig::Bytes(bytes) => Some(bytes.clone()),
+                GenesisConfig::Path(_) => {
+                    bail!("local forge backend does not support flattened dir for genesis")
+                }
+            },
+            None => None,
+        };
+        let swarm = self
+            .new_swarm_with_version(rng, node_num, version, genesis_modules)
+            .await?;
 
         Ok(Box::new(swarm))
     }

@@ -13,6 +13,7 @@ edition = "2018"
 anyhow = "1.0.38"
 bcs = "0.1.2"
 bytes = "1.0.1"
+fail = "0.4.0"
 futures = "0.3.12"
 hex = "0.4.3"
 hyper = "0.14.4"
@@ -26,15 +27,15 @@ warp = { version = "0.3.0", features = ["default"] }
 diem-config = { path = "../config" }
 diem-crypto = { path = "../crates/diem-crypto" }
 diem-json-rpc = { path = "../json-rpc" }
-diem-logger = { path = "../common/logger" }
+diem-logger = { path = "../crates/diem-logger" }
 diem-mempool = { path = "../mempool"}
-diem-metrics = { path = "../common/metrics" }
+diem-metrics = { path = "../crates/diem-metrics" }
 diem-types = { path = "../types" }
-diem-workspace-hack = { path = "../common/workspace-hack" }
+diem-workspace-hack = { version = "0.1", path = "../crates/diem-workspace-hack" }
 diem-api-types = { path = "./types", package = "diem-api-types" }
 storage-interface = { path = "../storage/storage-interface" }
 move-core-types = { path = "../language/move-core/types" }
-resource-viewer = { path = "../language/tools/resource-viewer" }
+move-resource-viewer = { path = "../language/tools/move-resource-viewer" }
 
 [dev-dependencies]
 rand = "0.8.3"
@@ -46,7 +47,7 @@ diem-crypto = { path = "../crates/diem-crypto" }
 diem-global-constants = { path = "../config/global-constants" }
 diem-mempool = { path = "../mempool", features = ["fuzzing"] }
 diem-secure-storage = { path = "../secure/storage" }
-diem-temppath = { path = "../common/temppath" }
+diem-temppath = { path = "../crates/diem-temppath" }
 diem-genesis-tool = {path = "../config/management/genesis", features = ["testing"] }
 diem-framework-releases = { path = "../diem-move/diem-framework/DPN/releases" }
 diem-sdk = { path = "../sdk" }
@@ -54,3 +55,6 @@ vm-validator = { path = "../vm-validator" }
 diem-vm = { path = "../diem-move/diem-vm" }
 executor = { path = "../execution/executor" }
 executor-types = { path = "../execution/executor-types" }
+
+[features]
+failpoints = ["fail/failpoints"]

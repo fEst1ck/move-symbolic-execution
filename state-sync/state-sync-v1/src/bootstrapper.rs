@@ -8,12 +8,12 @@ use crate::{
 };
 use consensus_notifications::ConsensusNotificationListener;
 use diem_config::{config::NodeConfig, network_id::NetworkId};
-use diem_types::{protocol_spec::DpnProto, waypoint::Waypoint};
+use diem_types::waypoint::Waypoint;
 use event_notifications::EventSubscriptionService;
-use executor_types::ChunkExecutor;
+use executor_types::ChunkExecutorTrait;
 use futures::channel::mpsc;
 use mempool_notifications::MempoolNotificationSender;
-use std::{boxed::Box, collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 use storage_interface::DbReader;
 use tokio::runtime::{Builder, Runtime};
 
@@ -25,12 +25,12 @@ pub struct StateSyncBootstrapper {
 }
 
 impl StateSyncBootstrapper {
-    pub fn bootstrap<M: MempoolNotificationSender + 'static>(
+    pub fn bootstrap<C: ChunkExecutorTrait + 'static, M: MempoolNotificationSender + 'static>(
         network: Vec<(NetworkId, StateSyncSender, StateSyncEvents)>,
         mempool_notifier: M,
         consensus_listener: ConsensusNotificationListener,
-        storage: Arc<dyn DbReader<DpnProto>>,
-        executor: Box<dyn ChunkExecutor>,
+        storage: Arc<dyn DbReader>,
+        chunk_executor: Arc<C>,
         node_config: &NodeConfig,
         waypoint: Waypoint,
         event_subscription_service: EventSubscriptionService,
@@ -42,7 +42,8 @@ impl StateSyncBootstrapper {
             .build()
             .expect("[State Sync] Failed to create runtime!");
 
-        let executor_proxy = ExecutorProxy::new(storage, executor, event_subscription_service);
+        let executor_proxy =
+            ExecutorProxy::new(storage, chunk_executor, event_subscription_service);
 
         Self::bootstrap_with_executor_proxy(
             runtime,

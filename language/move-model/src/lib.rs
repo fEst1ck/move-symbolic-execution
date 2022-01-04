@@ -20,9 +20,7 @@ use move_binary_format::{
         StructDefinitionIndex, Visibility,
     },
 };
-use move_core_types::{account_address::AccountAddress, identifier::Identifier};
-use move_ir_types::location::sp;
-use move_lang::{
+use move_compiler::{
     self,
     compiled_unit::{self, AnnotatedCompiledScript, AnnotatedCompiledUnit},
     diagnostics::Diagnostics,
@@ -31,6 +29,8 @@ use move_lang::{
     shared::{parse_named_address, unique_map::UniqueMap, NumericalAddress},
     Compiler, Flags, PASS_COMPILATION, PASS_EXPANSION, PASS_PARSER,
 };
+use move_core_types::{account_address::AccountAddress, identifier::Identifier};
+use move_ir_types::location::sp;
 use move_symbol_pool::Symbol as MoveStringSymbol;
 use num::{BigUint, Num};
 
@@ -39,6 +39,7 @@ use crate::{
     builder::model_builder::ModelBuilder,
     model::{FunId, FunctionData, GlobalEnv, Loc, ModuleData, ModuleId, StructId},
     options::ModelBuilderOptions,
+    simplifier::{SpecRewriter, SpecRewriterPipeline},
 };
 
 pub mod ast;
@@ -50,6 +51,7 @@ pub mod model;
 pub mod native;
 pub mod options;
 pub mod pragmas;
+pub mod simplifier;
 pub mod spec_translator;
 pub mod symbol;
 pub mod ty;
@@ -491,7 +493,7 @@ fn run_spec_checker(
                     named_script: script,
                     function_info,
                 }) => {
-                    let move_lang::expansion::ast::Script {
+                    let move_compiler::expansion::ast::Script {
                         attributes,
                         loc,
                         immediate_neighbors,
@@ -571,6 +573,19 @@ fn run_spec_checker(
     }
     // After all specs have been processed, warn about any unused schemas.
     builder.warn_unused_schemas();
+
+    // Apply simplification passes
+    run_spec_simplifier(env);
+}
+
+fn run_spec_simplifier(env: &mut GlobalEnv) {
+    let options = env
+        .get_extension::<ModelBuilderOptions>()
+        .expect("options for model builder");
+    let mut rewriter = SpecRewriterPipeline::new(&options.simplification_pipeline);
+    rewriter
+        .override_with_rewrite(env)
+        .unwrap_or_else(|e| panic!("Failed to run spec simplification: {}", e))
 }
 
 // =================================================================================================

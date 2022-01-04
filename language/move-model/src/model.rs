@@ -35,8 +35,6 @@ use move_command_line_common::files::FileHash;
 use num::{BigUint, One, ToPrimitive};
 use serde::{Deserialize, Serialize};
 
-use bytecode_source_map::{mapping::SourceMapping, source_map::SourceMap};
-use disassembler::disassembler::{Disassembler, DisassemblerOptions};
 use move_binary_format::{
     access::ModuleAccess,
     binary_views::BinaryIndexedView,
@@ -52,9 +50,11 @@ use move_binary_format::{
     },
     CompiledModule,
 };
+use move_bytecode_source_map::{mapping::SourceMapping, source_map::SourceMap};
 use move_core_types::{
     account_address::AccountAddress, identifier::Identifier, language_storage, value::MoveValue,
 };
+use move_disassembler::disassembler::{Disassembler, DisassemblerOptions};
 
 use crate::{
     ast::{
@@ -70,6 +70,7 @@ use crate::{
 };
 
 // import and re-expose symbols
+use move_binary_format::file_format::CodeOffset;
 pub use move_binary_format::file_format::{AbilitySet, Visibility as FunctionVisibility};
 
 // =================================================================================================
@@ -168,7 +169,7 @@ pub type MoveIrLoc = move_ir_types::location::Loc;
 ///
 /// We have two kinds of ids: those based on an index, and those based on a symbol. We use
 /// the symbol based ids where we do not have control of the definition index order in bytecode
-/// (i.e. we do not know in which order move-lang enters functions and structs into file format),
+/// (i.e. we do not know in which order move-compiler enters functions and structs into file format),
 /// and index based ids where we do have control (for modules, SpecFun and SpecVar).
 ///
 /// In any case, ids are opaque in the sense that if someone has a StructId or similar in hand,
@@ -738,8 +739,8 @@ impl GlobalEnv {
         self.internal_loc.clone()
     }
 
-    /// Converts a Loc as used by the move-lang compiler to the one we are using here.
-    /// TODO: move-lang should use FileId as well so we don't need this here. There is already
+    /// Converts a Loc as used by the move-compiler compiler to the one we are using here.
+    /// TODO: move-compiler should use FileId as well so we don't need this here. There is already
     /// a todo in their code to remove the current use of `&'static str` for file names in Loc.
     pub fn to_loc(&self, loc: &MoveIrLoc) -> Loc {
         let file_id = self.get_file_id(loc.file_hash()).unwrap_or_else(|| {
@@ -935,9 +936,38 @@ impl GlobalEnv {
     }
 
     /// Returns true if a spec fun is used in specs.
-    pub fn is_spec_fun_used(&self, module_id: ModuleId, spec_fun_id: SpecFunId) -> bool {
-        self.used_spec_funs
-            .contains(&module_id.qualified(spec_fun_id))
+    pub fn is_spec_fun_used(&self, id: QualifiedId<SpecFunId>) -> bool {
+        self.used_spec_funs.contains(&id)
+    }
+
+    /// Determines whether the given spec fun is recursive.
+    pub fn is_spec_fun_recursive(&self, id: QualifiedId<SpecFunId>) -> bool {
+        fn is_caller(
+            env: &GlobalEnv,
+            visited: &mut BTreeSet<QualifiedId<SpecFunId>>,
+            caller: QualifiedId<SpecFunId>,
+            fun: QualifiedId<SpecFunId>,
+        ) -> bool {
+            if !visited.insert(caller) {
+                return false;
+            }
+            let module = env.get_module(caller.module_id);
+            let decl = module.get_spec_fun(caller.id);
+            decl.callees.contains(&fun)
+                || decl
+                    .callees
+                    .iter()
+                    .any(|trans_caller| is_caller(env, visited, *trans_caller, fun))
+        }
+        let module = self.get_module(id.module_id);
+        let is_recursive = *module.get_spec_fun(id.id).is_recursive.borrow();
+        if let Some(b) = is_recursive {
+            b
+        } else {
+            let b = is_caller(self, &mut BTreeSet::new(), id, id);
+            *module.get_spec_fun(id.id).is_recursive.borrow_mut() = Some(b);
+            b
+        }
     }
 
     /// Returns true if the type represents the well-known event handle type.
@@ -1516,6 +1546,64 @@ impl GlobalEnv {
             }
         }
         total
+    }
+
+    /// Override the specification for a given module
+    pub fn override_module_spec(&mut self, mid: ModuleId, spec: Spec) {
+        let module_data = self
+            .module_data
+            .iter_mut()
+            .filter(|m| m.id == mid)
+            .exactly_one()
+            .unwrap_or_else(|_| {
+                panic!("Expect one and only one module for {:?}", mid);
+            });
+        module_data.module_spec = spec;
+    }
+
+    /// Override the specification for a given function
+    pub fn override_function_spec(&mut self, fid: QualifiedId<FunId>, spec: Spec) {
+        let func_data = self
+            .module_data
+            .iter_mut()
+            .filter(|m| m.id == fid.module_id)
+            .map(|m| {
+                m.function_data
+                    .iter_mut()
+                    .filter(|(k, _)| **k == fid.id)
+                    .map(|(_, v)| v)
+            })
+            .flatten()
+            .exactly_one()
+            .unwrap_or_else(|_| {
+                panic!("Expect one and only one function for {:?}", fid);
+            });
+        func_data.spec = spec;
+    }
+
+    /// Override the specification for a given code location
+    pub fn override_inline_spec(
+        &mut self,
+        fid: QualifiedId<FunId>,
+        code_offset: CodeOffset,
+        spec: Spec,
+    ) {
+        let func_data = self
+            .module_data
+            .iter_mut()
+            .filter(|m| m.id == fid.module_id)
+            .map(|m| {
+                m.function_data
+                    .iter_mut()
+                    .filter(|(k, _)| **k == fid.id)
+                    .map(|(_, v)| v)
+            })
+            .flatten()
+            .exactly_one()
+            .unwrap_or_else(|_| {
+                panic!("Expect one and only one function for {:?}", fid);
+            });
+        func_data.spec.on_impl.insert(code_offset, spec);
     }
 }
 
@@ -2713,7 +2801,7 @@ pub struct FunctionData {
     type_arg_names: Vec<Symbol>,
 
     /// Specification associated with this function.
-    pub spec: Spec,
+    spec: Spec,
 
     /// A cache for the called functions.
     called_funs: RefCell<Option<BTreeSet<QualifiedId<FunId>>>>,

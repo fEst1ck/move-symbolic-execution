@@ -6,6 +6,7 @@ use move_binary_format::errors::*;
 use move_core_types::{
     account_address::AccountAddress,
     effects::{ChangeSet, Event},
+    gas_schedule::GasAlgebra,
     identifier::IdentStr,
     language_storage::{ModuleId, TypeTag},
     resolver::MoveResolver,
@@ -16,6 +17,30 @@ use move_vm_types::gas_schedule::GasStatus;
 pub struct Session<'r, 'l, S> {
     pub(crate) runtime: &'l VMRuntime,
     pub(crate) data_cache: TransactionDataCache<'r, 'l, S>,
+}
+
+/// Result of executing a function in the VM
+pub enum ExecutionResult {
+    /// Execution completed successfully and changed global state
+    Success {
+        /// Changes to global state that occurred during execution
+        change_set: ChangeSet,
+        /// Events emitted during execution
+        events: Vec<Event>,
+        /// Values returned by the function
+        return_values: Vec<Vec<u8>>,
+        /// Final value of inputs passed in to the entrypoint via a mutable reference
+        mutable_ref_values: Vec<Vec<u8>>,
+        /// Gas used during execution
+        gas_used: u64,
+    },
+    /// Execution failed and had no side effects
+    Fail {
+        /// The reason execution failed
+        error: VMError,
+        /// Gas used during execution
+        gas_used: u64,
+    },
 }
 
 impl<'r, 'l, S: MoveResolver> Session<'r, 'l, S> {
@@ -52,6 +77,52 @@ impl<'r, 'l, S: MoveResolver> Session<'r, 'l, S> {
         )
     }
 
+    /// Execute `module`::`fuction_name`<`ty_args`>(`args`) and return the effects in
+    /// an `ExecutionResult`, including
+    /// * the write set and events
+    /// * return values of the function
+    /// * changes to values passes by mutable reference to the function
+    /// Arguments to the function in `args` can be any type--ground types, user-defined struct
+    /// types, and references (including mutable references).
+    /// A reference argument in `args[i]` with type `&T` or `&mut T` will be deserialized as a `T`.
+    /// Pure arguments are deserialized in the obvious way.
+    ///
+    /// NOTE: The ability to deserialize `args` into arbitrary types is very powerful--e.g., it can
+    /// used to manufacture `signer`'s or `Coin`'s from raw bytes. It is the respmsibility of the
+    /// caller (e.g. adapter) to ensure that this power is useed responsibility/securely for its use-case.
+    pub fn execute_function_for_effects(
+        mut self,
+        module: &ModuleId,
+        function_name: &IdentStr,
+        ty_args: Vec<TypeTag>,
+        args: Vec<Vec<u8>>,
+        gas_status: &mut GasStatus,
+    ) -> ExecutionResult {
+        let gas_budget = gas_status.remaining_gas().get();
+        let execution_res = self.runtime.execute_function_for_effects(
+            module,
+            function_name,
+            ty_args,
+            args,
+            &mut self.data_cache,
+            gas_status,
+        );
+        let gas_used = gas_budget - gas_status.remaining_gas().get();
+        match execution_res {
+            Ok((return_values, mutable_ref_values)) => match self.finish() {
+                Ok((change_set, events)) => ExecutionResult::Success {
+                    change_set,
+                    events,
+                    return_values,
+                    mutable_ref_values,
+                    gas_used,
+                },
+                Err(error) => ExecutionResult::Fail { error, gas_used },
+            },
+            Err(error) => ExecutionResult::Fail { error, gas_used },
+        }
+    }
+
     /// Execute a Move script function with the given arguments.
     ///
     /// Unlike `execute_function` which is designed for system logic, `execute_script_function` is
@@ -63,7 +134,7 @@ impl<'r, 'l, S: MoveResolver> Session<'r, 'l, S> {
     ///   - The function does not exist.
     ///   - The function does not have script visibility.
     ///   - The signature is not valid for a script. Not all script-visible module functions can
-    ///     be invoked from this entry point. See `bytecode_verifier::script_signature` for the
+    ///     be invoked from this entry point. See `move_bytecode_verifier::script_signature` for the
     ///     rules.
     ///   - Type arguments refer to a non-existent type.
     ///   - Arguments (senders included) fail to deserialize or fail to match the signature of the
@@ -101,7 +172,7 @@ impl<'r, 'l, S: MoveResolver> Session<'r, 'l, S> {
     /// The Move VM MUST return a user error (in other words, an error that's not an invariant
     /// violation) if
     ///   - The script fails to deserialize or verify. Not all expressible signatures are valid.
-    ///     See `bytecode_verifier::script_signature` for the rules.
+    ///     See `move_bytecode_verifier::script_signature` for the rules.
     ///   - Type arguments refer to a non-existent type.
     ///   - Arguments (senders included) fail to deserialize or fail to match the signature of the
     ///     script function.

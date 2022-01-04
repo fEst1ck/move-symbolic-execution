@@ -11,6 +11,7 @@ edition = "2018"
 
 [dependencies]
 anyhow = { version = "1.0", features = ["backtrace"] }
+async-trait = "0.1.42"
 base64 = "0.13.0"
 futures = "0.3.12"
 hyper = { version = "0.14.4", features = ["full"] }
@@ -36,13 +37,15 @@ termcolor = "1.1.2"
 tokio = { version = "1.8.1", features = ["full"] }
 url = "2.2.2"
 
-debug-interface = { path = "../../common/debug-interface" }
+debug-interface = { path = "../../crates/debug-interface" }
 diem-config = { path = "../../config" }
 diem-framework-releases = { path = "../../diem-move/diem-framework/DPN/releases" }
 diem-genesis-tool = { path = "../../config/management/genesis" }
-diem-logger = { path = "../../common/logger" }
-diem-retrier = { path = "../../common/retrier" }
+diem-logger = { path = "../../crates/diem-logger" }
+diem-retrier = { path = "../../crates/diem-retrier" }
 diem-sdk = { path = "../../sdk" }
+diem-rest-client = { path = "../../crates/diem-rest-client"}
 diem-secure-storage = { path = "../../secure/storage" }
-diem-workspace-hack = { path = "../../common/workspace-hack" }
+diem-transaction-builder = { path = "../../sdk/transaction-builder" }
+diem-workspace-hack = { version = "0.1", path = "../../crates/diem-workspace-hack" }
 transaction-emitter = { path = "../../crates/transaction-emitter" }

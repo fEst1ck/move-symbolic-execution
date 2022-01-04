@@ -1,17 +1,19 @@
 // Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
+
+use crate::context::UserContext;
 use anyhow::{anyhow, Result};
-use diem_api_types::mime_types;
 use diem_crypto::ed25519::{Ed25519PrivateKey, Ed25519PublicKey};
-use diem_sdk::client::{AccountAddress, BlockingClient};
+use diem_sdk::client::AccountAddress;
 use diem_types::transaction::authenticator::AuthenticationKey;
 use directories::BaseDirs;
-use move_package::compilation::compiled_package::CompiledPackage;
-use reqwest::{Client, Response, StatusCode};
+use move_package::{
+    compilation::compiled_package::CompiledPackage,
+    source_package::{layout::SourcePackageLayout, manifest_parser},
+};
 use serde::{Deserialize, Serialize};
 use serde_generate as serdegen;
 use serde_generate::SourceInstaller;
-use serde_json::Value;
 use serde_reflection::Registry;
 use std::{
     collections::{BTreeMap, HashMap},
@@ -27,10 +29,15 @@ use transaction_builder_generator::SourceInstaller as BuildgenSourceInstaller;
 use url::Url;
 
 pub const MAIN_PKG_PATH: &str = "main";
-pub const NEW_KEY_FILE_CONTENT: &[u8] = include_bytes!("../new_account.key");
-const DIEM_ACCOUNT_TYPE: &str = "0x1::DiemAccount::DiemAccount";
 
 pub const LOCALHOST_NAME: &str = "localhost";
+
+/// Temporary address for initial codegen, replaced on subsequent commands
+/// when accounts are available.
+pub const PLACEHOLDER_ADDRESS: &str = "0xdeadbeef";
+
+pub const LATEST_USERNAME: &str = "latest";
+pub const TEST_USERNAME: &str = "test";
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "kebab-case")]
@@ -55,24 +62,6 @@ pub fn read_project_config(project_path: &Path) -> Result<ProjectConfig> {
     let config_string = fs::read_to_string(project_path.join("Shuffle").with_extension("toml"))?;
     let read_config: ProjectConfig = toml::from_str(config_string.as_str())?;
     Ok(read_config)
-}
-
-/// Send a transaction to the blockchain through the blocking client.
-pub fn send_transaction(
-    client: &BlockingClient,
-    tx: diem_types::transaction::SignedTransaction,
-) -> Result<()> {
-    use diem_json_rpc_types::views::VMStatusView;
-
-    client.submit(&tx)?;
-    let status = client
-        .wait_for_signed_transaction(&tx, Some(std::time::Duration::from_secs(60)), None)?
-        .into_inner()
-        .vm_status;
-    if status != VMStatusView::Executed {
-        return Err(anyhow::anyhow!("transaction execution failed: {}", status));
-    }
-    Ok(())
 }
 
 /// Checks the current directory, and then parent directories for a Shuffle.toml
@@ -101,8 +90,7 @@ pub fn get_filtered_envs_for_deno(
     home: &Home,
     project_path: &Path,
     network: &Network,
-    key_path: &Path,
-    sender_address: AccountAddress,
+    users: &[&UserContext],
 ) -> Result<HashMap<String, String>> {
     let mut filtered_envs: HashMap<String, String> = HashMap::new();
     filtered_envs.insert(
@@ -113,14 +101,10 @@ pub fn get_filtered_envs_for_deno(
         String::from("SHUFFLE_BASE_NETWORKS_PATH"),
         home.get_networks_path().to_string_lossy().to_string(),
     );
-    filtered_envs.insert(
-        String::from("SENDER_ADDRESS"),
-        sender_address.to_hex_literal(),
-    );
-    filtered_envs.insert(
-        String::from("PRIVATE_KEY_PATH"),
-        key_path.to_string_lossy().to_string(),
-    );
+
+    for u in users {
+        filtered_envs.extend(u.to_envs());
+    }
 
     filtered_envs.insert(String::from("SHUFFLE_NETWORK_NAME"), network.get_name());
     filtered_envs.insert(
@@ -130,167 +114,41 @@ pub fn get_filtered_envs_for_deno(
     Ok(filtered_envs)
 }
 
-pub struct DevApiClient {
-    client: Client,
-    url: Url,
-}
-
-// Client that will make GET and POST requests based off of Dev API
-impl DevApiClient {
-    pub fn new(client: Client, url: Url) -> Result<Self> {
-        Ok(Self { client, url })
-    }
-
-    pub async fn get_transactions_by_hash(&self, hash: &str) -> Result<Value> {
-        let path = self.url.join(format!("transactions/{}", hash).as_str())?;
-
-        DevApiClient::check_response(
-            self.client.get(path.as_str()).send().await?,
-            "GET /transactions failed",
-        )
-        .await
-    }
-
-    pub async fn post_transactions(&self, txn_bytes: Vec<u8>) -> Result<Value> {
-        let path = self.url.join("transactions")?;
-
-        DevApiClient::check_response(
-            self.client
-                .post(path.as_str())
-                .header("Content-Type", mime_types::BCS_SIGNED_TRANSACTION)
-                .body(txn_bytes)
-                .send()
-                .await?,
-            "POST /transactions failed",
-        )
-        .await
-    }
-
-    async fn get_account_resources(&self, address: AccountAddress) -> Result<Value> {
-        let path = self
-            .url
-            .join(format!("accounts/{}/resources", address.to_hex_literal()).as_str())?;
-
-        DevApiClient::check_response(
-            self.client.get(path.as_str()).send().await?,
-            "Failed to get account resources with provided address",
-        )
-        .await
-    }
-
-    pub async fn get_account_transactions_response(
-        &self,
-        address: AccountAddress,
-        start: u64,
-        limit: u64,
-    ) -> Result<Value> {
-        let path = self
-            .url
-            .join(format!("accounts/{}/transactions", address).as_str())?;
-
-        DevApiClient::check_response(
-            self.client
-                .get(path.as_str())
-                .query(&[("start", start.to_string().as_str())])
-                .query(&[("limit", limit.to_string().as_str())])
-                .send()
-                .await?,
-            "Failed to get account transactions with provided address",
-        )
-        .await
-    }
-
-    async fn check_response(resp: Response, failure_message: &str) -> Result<Value> {
-        let status = resp.status();
-        let json = resp.json().await?;
-        DevApiClient::check_response_status_code(
-            &status,
-            DevApiClient::response_context(failure_message, &json)?.as_str(),
-        )?;
-        Ok(json)
-    }
-
-    fn check_response_status_code(status: &StatusCode, context: &str) -> Result<()> {
-        match status >= &StatusCode::from_u16(200)? && status < &StatusCode::from_u16(300)? {
-            true => Ok(()),
-            false => Err(anyhow!(context.to_string())),
-        }
-    }
-
-    fn response_context(message: &str, json: &Value) -> Result<String> {
-        Ok(format!(
-            "{}. Here is the json block for the response that failed:\n{:?}",
-            message, json
-        ))
-    }
-
-    pub async fn get_account_sequence_number(&self, address: AccountAddress) -> Result<u64> {
-        let account_resources_json = self.get_account_resources(address).await?;
-        DevApiClient::parse_json_for_account_seq_num(account_resources_json)
-    }
-
-    fn parse_json_for_account_seq_num(json_objects: Value) -> Result<u64> {
-        let json_arr = json_objects
-            .as_array()
-            .ok_or_else(|| anyhow!("Couldn't convert to array"))?
-            .to_vec();
-        let mut seq_number_string = "";
-        for object in &json_arr {
-            if object["type"] == DIEM_ACCOUNT_TYPE {
-                seq_number_string = object["data"]["sequence_number"]
-                    .as_str()
-                    .ok_or_else(|| anyhow!("Invalid sequence number string"))?;
-                break;
-            };
-        }
-        let seq_number: u64 = seq_number_string.parse()?;
-        Ok(seq_number)
-    }
-}
-
 pub struct NetworkHome {
     accounts_path: PathBuf,
-    latest_account_path: PathBuf,
-    latest_account_key_path: PathBuf,
-    latest_account_address_path: PathBuf,
-    test_path: PathBuf,
-    test_key_path: PathBuf,
-    test_key_address_path: PathBuf,
 }
 
 impl NetworkHome {
     pub fn new(network_base_path: &Path) -> Self {
         NetworkHome {
             accounts_path: network_base_path.join("accounts"),
-            latest_account_path: network_base_path.join("accounts/latest"),
-            latest_account_key_path: network_base_path.join("accounts/latest/dev.key"),
-            latest_account_address_path: network_base_path.join("accounts/latest/address"),
-            test_path: network_base_path.join("accounts/test"),
-            test_key_path: network_base_path.join("accounts/test/dev.key"),
-            test_key_address_path: network_base_path.join("accounts/test/address"),
         }
     }
 
-    pub fn get_latest_account_key_path(&self) -> &Path {
-        &self.latest_account_key_path
+    pub fn key_path_for(&self, username: &str) -> PathBuf {
+        self.accounts_path.join(username).join("dev.key")
     }
 
-    pub fn get_latest_account_address_path(&self) -> &Path {
-        &self.latest_account_address_path
+    pub fn address_path_for(&self, username: &str) -> PathBuf {
+        self.accounts_path.join(username).join("address")
     }
 
-    #[allow(dead_code)]
-    pub fn get_latest_address(&self) -> Result<AccountAddress> {
-        let address_str = std::fs::read_to_string(&self.latest_account_address_path)?;
+    pub fn user_context_for(&self, username: &str) -> Result<UserContext> {
+        Ok(UserContext::new(
+            username,
+            self.address_for(username)?,
+            &self.key_path_for(username),
+        ))
+    }
+
+    pub fn address_for(&self, username: &str) -> Result<AccountAddress> {
+        self.check_address_path_for_user_exists(username)?;
+        let address_str = std::fs::read_to_string(&self.address_path_for(username))?;
         AccountAddress::from_str(address_str.as_str()).map_err(anyhow::Error::new)
     }
 
     pub fn get_accounts_path(&self) -> &Path {
         &self.accounts_path
-    }
-
-    pub fn get_test_key_path(&self) -> &Path {
-        &self.test_key_path
     }
 
     pub fn create_archive_dir(&self, time: Duration) -> Result<PathBuf> {
@@ -299,38 +157,39 @@ impl NetworkHome {
         Ok(archived_dir)
     }
 
-    pub fn archive_old_key(&self, archived_dir: &Path) -> Result<()> {
-        let old_key_path = self.latest_account_key_path.as_path();
+    pub fn archive_old_key_for(&self, username: &str, archived_dir: &Path) -> Result<()> {
+        let old_key_path = self.key_path_for(username);
         let archived_key_path = archived_dir.join("dev.key");
         fs::copy(old_key_path, archived_key_path)?;
         Ok(())
     }
 
-    pub fn archive_old_address(&self, archived_dir: &Path) -> Result<()> {
-        let old_address_path = self.latest_account_address_path.as_path();
+    pub fn archive_old_address_for(&self, username: &str, archived_dir: &Path) -> Result<()> {
+        let old_address_path = self.address_path_for(username);
         let archived_address_path = archived_dir.join("address");
         fs::copy(old_address_path, archived_address_path)?;
         Ok(())
     }
 
     pub fn generate_paths_if_nonexistent(&self) -> Result<()> {
-        fs::create_dir_all(self.latest_account_path.as_path())?;
-        fs::create_dir_all(self.test_path.as_path())?;
+        fs::create_dir_all(self.accounts_path.join(LATEST_USERNAME))?;
+        fs::create_dir_all(self.accounts_path.join(TEST_USERNAME))?;
         Ok(())
     }
 
     pub fn generate_key_file(&self) -> Result<Ed25519PrivateKey> {
-        // Using NEW_KEY_FILE for now due to hard coded address in
-        // /diem/shuffle/move/examples/main/sources/move.toml
-        fs::write(self.latest_account_key_path.as_path(), NEW_KEY_FILE_CONTENT)?;
-        Ok(generate_key::load_key(
-            self.latest_account_key_path.as_path(),
+        Ok(generate_key::generate_and_save_key(
+            self.key_path_for(LATEST_USERNAME).as_path(),
         ))
     }
 
-    pub fn generate_latest_address_file(&self, public_key: &Ed25519PublicKey) -> Result<()> {
+    pub fn generate_address_file(
+        &self,
+        username: &str,
+        public_key: &Ed25519PublicKey,
+    ) -> Result<()> {
         let address = AuthenticationKey::ed25519(public_key).derived_address();
-        let address_filepath = self.latest_account_address_path.as_path();
+        let address_filepath = self.address_path_for(username);
         let mut file = File::create(address_filepath)?;
         file.write_all(address.to_string().as_ref())?;
         Ok(())
@@ -338,30 +197,30 @@ impl NetworkHome {
 
     pub fn generate_testkey_file(&self) -> Result<Ed25519PrivateKey> {
         Ok(generate_key::generate_and_save_key(
-            self.test_key_path.as_path(),
+            self.key_path_for(TEST_USERNAME).as_path(),
         ))
     }
 
     pub fn generate_testkey_address_file(&self, public_key: &Ed25519PublicKey) -> Result<()> {
         let address = AuthenticationKey::ed25519(public_key).derived_address();
-        let address_filepath = self.test_key_address_path.as_path();
+        let address_filepath = self.address_path_for(TEST_USERNAME);
         let mut file = File::create(address_filepath)?;
         file.write_all(address.to_string().as_ref())?;
         Ok(())
     }
 
-    pub fn copy_key_to_latest(&self, key_path: &Path) -> Result<()> {
+    pub fn copy_key_to(&self, username: &str, key_path: &Path) -> Result<()> {
         let key = generate_key::load_key(key_path);
-        self.save_key_as_latest(key)
+        self.save_key(username, key)
     }
 
-    pub fn save_key_as_latest(&self, key: Ed25519PrivateKey) -> Result<()> {
-        generate_key::save_key(key, self.latest_account_key_path.as_path());
+    pub fn save_key(&self, username: &str, key: Ed25519PrivateKey) -> Result<()> {
+        generate_key::save_key(key, self.key_path_for(username));
         Ok(())
     }
 
-    pub fn check_account_path_exists(&self) -> Result<()> {
-        match self.accounts_path.is_dir() {
+    pub fn check_address_path_for_user_exists(&self, username: &str) -> Result<()> {
+        match self.address_path_for(username).exists() {
             true => Ok(()),
             false => Err(anyhow!(
                 "An account hasn't been created yet! Run shuffle account first"
@@ -423,18 +282,16 @@ impl Home {
     }
 
     pub fn read_networks_toml(&self) -> Result<NetworksConfig> {
-        self.check_networks_toml_exists()?;
+        self.ensure_networks_toml_exists()?;
         let network_toml_contents = fs::read_to_string(self.networks_config_path.as_path())?;
         let network_toml: NetworksConfig = toml::from_str(network_toml_contents.as_str())?;
         Ok(network_toml)
     }
 
-    fn check_networks_toml_exists(&self) -> Result<()> {
+    fn ensure_networks_toml_exists(&self) -> Result<()> {
         match self.networks_config_path.exists() {
             true => Ok(()),
-            false => Err(anyhow!(
-                "A project hasn't been created yet. Run shuffle new first"
-            )),
+            false => self.write_default_networks_config_into_toml_if_nonexistent(),
         }
     }
 
@@ -444,6 +301,7 @@ impl Home {
 
     pub fn write_default_networks_config_into_toml_if_nonexistent(&self) -> Result<()> {
         if !&self.networks_config_path.exists() {
+            fs::create_dir_all(&self.shuffle_path)?;
             let networks_config_string = toml::to_string_pretty(&NetworksConfig::default())?;
             fs::write(&self.networks_config_path, networks_config_string)?;
         }
@@ -484,6 +342,11 @@ pub struct NetworksConfig {
 }
 
 impl NetworksConfig {
+    #[allow(dead_code)]
+    pub fn new(networks: BTreeMap<String, Network>) -> NetworksConfig {
+        NetworksConfig { networks }
+    }
+
     pub fn get(&self, network_name: &str) -> Result<Network> {
         Ok(self
             .networks
@@ -538,15 +401,11 @@ impl Network {
         self.dev_api_url.clone()
     }
 
-    pub fn get_optional_faucet_url(&self) -> Option<Url> {
+    pub fn get_faucet_url(&self) -> Option<Url> {
         self.faucet_url.clone()
     }
 
-    pub fn get_faucet_url(&self) -> Url {
-        Network::normalize_faucet_url(self).unwrap()
-    }
-
-    fn normalize_faucet_url(&self) -> Result<Url> {
+    pub fn normalized_faucet_url(&self) -> Result<Url> {
         match &self.faucet_url {
             Some(faucet) => Ok(faucet.clone()),
             None => Err(anyhow!("This network doesn't have a faucet url")),
@@ -565,12 +424,20 @@ impl Default for Network {
     }
 }
 
-/// Generates the typescript bindings for the main Move package based on the embedded
-/// diem types and Move stdlib. Mimics much of the transaction_builder_generator's CLI
-/// except with typescript defaults and embedded content, as opposed to repo directory paths.
-pub fn generate_typescript_libraries(project_path: &Path) -> Result<()> {
+/// Generates the typescript bindings for the main Move package.
+/// Requires a publishing address for the code generation of script functions
+/// that need the address as part of the Module Id.
+/// ie: 0x1::MyModule::script_function
+pub fn codegen_typescript_libraries(
+    project_path: &Path,
+    publishing_address: &AccountAddress,
+) -> Result<()> {
+    println!(
+        "Generating Typescript Libraries for {}",
+        publishing_address.to_string()
+    );
     let pkg_path = project_path.join(MAIN_PKG_PATH);
-    let _compiled_package = build_move_package(&pkg_path)?;
+    build_move_package(&pkg_path, publishing_address)?;
     let target_dir = pkg_path.join("generated");
     let installer = serdegen::typescript::Installer::new(target_dir.clone());
     generate_runtime(&installer)?;
@@ -602,15 +469,42 @@ fn generate_runtime(installer: &serdegen::typescript::Installer) -> Result<()> {
 }
 
 /// Builds a package using the move package system.
-pub fn build_move_package(pkg_path: &Path) -> Result<CompiledPackage> {
+pub fn build_move_package(
+    pkg_path: &Path,
+    publishing_address: &AccountAddress,
+) -> Result<CompiledPackage> {
     println!("Building {}...", pkg_path.display());
+
+    let named_publishing_addresses =
+        inject_publishing_address_into_manifest(pkg_path, publishing_address)?;
     let config = move_package::BuildConfig {
         dev_mode: true,
         generate_abis: true,
+        additional_named_addresses: named_publishing_addresses,
         ..Default::default()
     };
 
     config.compile_package(pkg_path, &mut std::io::stdout())
+}
+
+pub fn inject_publishing_address_into_manifest(
+    pkg_path: &Path,
+    publishing_address: &AccountAddress,
+) -> Result<BTreeMap<String, AccountAddress>> {
+    let path = SourcePackageLayout::try_find_root(pkg_path)?;
+    let manifest_string = std::fs::read_to_string(path.join(SourcePackageLayout::Manifest.path()))?;
+    let toml_manifest = manifest_parser::parse_move_manifest_string(manifest_string)?;
+    let manifest = manifest_parser::parse_source_manifest(toml_manifest)?;
+
+    let mut additional_named_addresses = BTreeMap::new();
+    if let Some(address_decls) = manifest.addresses {
+        for (name, addr) in address_decls {
+            if addr.is_none() {
+                additional_named_addresses.insert(name.to_string(), *publishing_address);
+            }
+        }
+    }
+    Ok(additional_named_addresses)
 }
 
 fn generate_transaction_builders(pkg_path: &Path, target_dir: &Path) -> Result<()> {
@@ -639,7 +533,6 @@ mod test {
     use crate::{new, shared::Home};
     use diem_crypto::PrivateKey;
     use diem_infallible::duration_since_epoch;
-    use serde_json::json;
     use std::fs;
     use tempfile::tempdir;
 
@@ -672,7 +565,7 @@ mod test {
     }
 
     #[test]
-    fn test_network_home_archive_old_key() {
+    fn test_network_home_archive_old_key_for() {
         let dir = tempdir().unwrap();
         fs::create_dir_all(dir.path().join("localhost/accounts/latest")).unwrap();
 
@@ -681,7 +574,9 @@ mod test {
 
         let time = duration_since_epoch();
         let archived_dir = network_home.create_archive_dir(time).unwrap();
-        network_home.archive_old_key(&archived_dir).unwrap();
+        network_home
+            .archive_old_key_for("latest", &archived_dir)
+            .unwrap();
         let test_archive_key_path = dir
             .path()
             .join("localhost/accounts")
@@ -693,20 +588,22 @@ mod test {
     }
 
     #[test]
-    fn test_network_home_archive_old_address() {
+    fn test_network_home_archive_old_address_for() {
         let dir = tempdir().unwrap();
         fs::create_dir_all(dir.path().join("localhost/accounts/latest")).unwrap();
 
         let network_home = NetworkHome::new(dir.path().join("localhost").as_path());
         let private_key = network_home.generate_key_file().unwrap();
         network_home
-            .generate_latest_address_file(&private_key.public_key())
+            .generate_address_file(LATEST_USERNAME, &private_key.public_key())
             .unwrap();
         let address_path = dir.path().join("localhost/accounts/latest/address");
 
         let time = duration_since_epoch();
         let archived_dir = network_home.create_archive_dir(time).unwrap();
-        network_home.archive_old_address(&archived_dir).unwrap();
+        network_home
+            .archive_old_address_for("latest", &archived_dir)
+            .unwrap();
         let test_archive_address_path = dir
             .path()
             .join("localhost/accounts")
@@ -752,7 +649,7 @@ mod test {
         let network_home = NetworkHome::new(dir.path().join("localhost").as_path());
         let public_key = network_home.generate_key_file().unwrap().public_key();
         network_home
-            .generate_latest_address_file(&public_key)
+            .generate_address_file(LATEST_USERNAME, &public_key)
             .unwrap();
         assert_eq!(
             dir.path()
@@ -778,8 +675,10 @@ mod test {
     fn test_generate_typescript_libraries() {
         let tmpdir = tempdir().unwrap();
         let dir_path = tmpdir.path();
-        new::write_example_move_packages(dir_path).expect("unable to create move main pkg");
-        generate_typescript_libraries(dir_path).expect("unable to generate TS libraries");
+        new::write_move_project_template(dir_path).expect("unable to create move main pkg");
+        let address =
+            AccountAddress::from_hex_literal("0x1").expect("unable to create address 0x1");
+        codegen_typescript_libraries(dir_path, &address).expect("unable to generate TS libraries");
 
         let script_path = dir_path.join("main/generated/diemStdlib/mod.ts");
         let output = std::process::Command::new("deno")
@@ -827,14 +726,6 @@ mod test {
     }
 
     #[test]
-    fn test_network_home_get_latest_key_path() {
-        let dir = tempdir().unwrap();
-        let network_home = NetworkHome::new(dir.path().join("localhost").as_path());
-        let correct_dir = dir.path().join("localhost/accounts/latest/dev.key");
-        assert_eq!(correct_dir, network_home.get_latest_account_key_path());
-    }
-
-    #[test]
     fn test_network_home_save_root_key() {
         let dir = tempdir().unwrap();
         fs::create_dir_all(dir.path().join("localhost/accounts/latest")).unwrap();
@@ -843,9 +734,9 @@ mod test {
 
         let network_home = NetworkHome::new(dir.path().join("localhost").as_path());
         network_home
-            .copy_key_to_latest(&user_root_key_path)
+            .copy_key_to(LATEST_USERNAME, &user_root_key_path)
             .unwrap();
-        let new_root_key = generate_key::load_key(network_home.get_latest_account_key_path());
+        let new_root_key = generate_key::load_key(network_home.key_path_for(LATEST_USERNAME));
 
         assert_eq!(new_root_key, user_root_key);
     }
@@ -868,15 +759,55 @@ mod test {
     }
 
     #[test]
-    fn test_network_home_check_account_dir_exists() {
+    fn test_network_home_check_address_path_for_user_exists() {
         let bad_dir = tempdir().unwrap();
         let network_home = NetworkHome::new(bad_dir.path().join("localhost").as_path());
-        assert_eq!(network_home.check_account_path_exists().is_err(), true);
+        assert!(network_home
+            .check_address_path_for_user_exists(LATEST_USERNAME)
+            .is_err());
 
         let good_dir = tempdir().unwrap();
-        fs::create_dir_all(good_dir.path().join("localhost/accounts")).unwrap();
+        fs::create_dir_all(good_dir.path().join("localhost/accounts/latest")).unwrap();
         let network_home = NetworkHome::new(good_dir.path().join("localhost").as_path());
-        assert_eq!(network_home.check_account_path_exists().is_err(), false);
+        network_home
+            .generate_address_file(LATEST_USERNAME, &generate_key::generate_key().public_key())
+            .unwrap();
+        assert!(!network_home
+            .check_address_path_for_user_exists(LATEST_USERNAME)
+            .is_err());
+    }
+
+    #[test]
+    fn test_key_path_for() {
+        let dir = tempdir().unwrap();
+        let network_home = NetworkHome::new(dir.path().join("localhost").as_path());
+        let correct_dir = dir.path().join("localhost/accounts/latest/dev.key");
+        assert_eq!(correct_dir, network_home.key_path_for("latest"));
+    }
+
+    #[test]
+    fn test_address_path_for() {
+        let dir = tempdir().unwrap();
+        let network_home = NetworkHome::new(dir.path().join("localhost").as_path());
+        let correct_dir = dir.path().join("localhost/accounts/latest/address");
+        assert_eq!(correct_dir, network_home.address_path_for("latest"));
+    }
+
+    #[test]
+    fn test_address_for() {
+        let dir = tempdir().unwrap();
+        let network_home = NetworkHome::new(dir.path().join("localhost").as_path());
+        assert!(network_home.address_for("latest").is_err());
+
+        fs::create_dir_all(dir.path().join("localhost/accounts/latest")).unwrap();
+
+        let public_key = generate_key::generate_key().public_key();
+        network_home
+            .generate_address_file("latest", &public_key)
+            .unwrap();
+        let address = network_home.address_for("latest").unwrap();
+        let correct_address = AuthenticationKey::ed25519(&public_key).derived_address();
+        assert_eq!(address, correct_address);
     }
 
     #[test]
@@ -931,10 +862,15 @@ mod test {
         let home = Home::new(dir.path()).unwrap();
         let project_path = Path::new("/Users/project_path");
         let network = get_test_localhost_network();
-        let key_path = Path::new("/Users/private_key_path/dev.key");
-        let address = AccountAddress::random();
+
+        let user = UserContext::new(
+            TEST_USERNAME,
+            AccountAddress::random(),
+            &PathBuf::from("/Users/private_key_path/dev.key"),
+        );
+
         let filtered_envs =
-            get_filtered_envs_for_deno(&home, project_path, &network, key_path, address).unwrap();
+            get_filtered_envs_for_deno(&home, project_path, &network, &[&user]).unwrap();
 
         assert_eq!(
             filtered_envs.get("PROJECT_PATH").unwrap(),
@@ -945,12 +881,12 @@ mod test {
             home.get_networks_path().to_string_lossy().as_ref(),
         );
         assert_eq!(
-            filtered_envs.get("SENDER_ADDRESS").unwrap(),
-            &address.to_hex_literal()
+            filtered_envs.get("ADDRESS_TEST").unwrap(),
+            &user.address().to_hex_literal()
         );
         assert_eq!(
-            filtered_envs.get("PRIVATE_KEY_PATH").unwrap(),
-            &key_path.to_string_lossy().to_string()
+            filtered_envs.get("PRIVATE_KEY_PATH_TEST").unwrap(),
+            &user.private_key_path().to_string_lossy().to_string()
         );
         assert_eq!(
             filtered_envs.get("SHUFFLE_NETWORK_NAME").unwrap(),
@@ -963,72 +899,10 @@ mod test {
     }
 
     #[test]
-    fn test_parse_json_for_seq_num() {
-        let value_obj = json!([{
-            "type":"0x1::DiemAccount::DiemAccount",
-            "data": {
-                "authentication_key": "0x88cae30f0fea7879708788df9e7c9b7524163afcc6e33b0a9473852e18327fa9",
-                "key_rotation_capability":{
-                    "vec":[{"account_address":"0x24163afcc6e33b0a9473852e18327fa9"}]
-                },
-                "received_events":{
-                    "counter":"0",
-                    "guid":{}
-                },
-                "sent_events":{},
-                "sequence_number":"3",
-                "withdraw_capability":{
-                    "vec":[{"account_address":"0x24163afcc6e33b0a9473852e18327fa9"}]
-                }
-            }
-        }]);
-
-        let ret_seq_num = DevApiClient::parse_json_for_account_seq_num(value_obj).unwrap();
-        assert_eq!(ret_seq_num, 3);
-    }
-
-    #[test]
-    fn test_check_response_status_code() {
-        assert_eq!(
-            DevApiClient::check_response_status_code(
-                &StatusCode::from_u16(200).unwrap(),
-                "Success"
-            )
-            .is_err(),
-            false
-        );
-        assert_eq!(
-            DevApiClient::check_response_status_code(&StatusCode::from_u16(404).unwrap(), "Failed")
-                .is_err(),
-            true
-        );
-    }
-
-    #[test]
-    fn test_response_context() {
-        let failed_obj = json!({
-            "code": 404,
-            "message": "account not found by address(0x132412341234124) and ledger version(81)",
-            "diem_ledger_version": "81"
-        });
-        let context = DevApiClient::response_context(
-            "Failed to get account resources with provided address",
-            &failed_obj,
-        )
-        .unwrap();
-
-        let correct_string = format!("Failed to get account resources with provided address. Here is the json block for the response that failed:\n{:?}", failed_obj);
-        assert_eq!(context, correct_string);
-    }
-
-    #[test]
     fn test_home_check_networks_toml_exists() {
         let dir = tempdir().unwrap();
         let home = Home::new(dir.path()).unwrap();
-        assert_eq!(home.check_networks_toml_exists().is_err(), true);
-        fs::create_dir_all(dir.path().join(".shuffle")).unwrap();
-        home.write_default_networks_config_into_toml_if_nonexistent()
-            .unwrap();
-        assert_eq!(home.check_networks_toml_exists().is_err(), false);
+        assert_eq!(home.ensure_networks_toml_exists().is_err(), false);
+        assert_eq!(home.networks_config_path.exists(), true);
     }
 }

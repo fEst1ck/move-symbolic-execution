@@ -21,8 +21,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[test]
-fn test_basic_state_synchronization() {
+#[tokio::test]
+async fn test_basic_state_synchronization() {
     // - Start a swarm of 4 nodes (3 nodes forming a QC).
     // - Kill one node and continue submitting transactions to the others.
     // - Restart the node
@@ -30,33 +30,35 @@ fn test_basic_state_synchronization() {
     // - Verify that the restarted node has synced up with the submitted transactions.
 
     // we set a smaller chunk limit (=5) here to properly test multi-chunk state sync
-    let mut swarm = new_local_swarm(4);
+    let mut swarm = new_local_swarm(4).await;
     for validator in swarm.validators_mut() {
         let mut config = validator.config().clone();
         config.state_sync.chunk_limit = 5;
         config.save(validator.config_path()).unwrap();
-        validator.restart().unwrap();
+        validator.restart().await.unwrap();
     }
-    swarm.launch().unwrap(); // Make sure all nodes are healthy and live
+    swarm.launch().await.unwrap(); // Make sure all nodes are healthy and live
     let validator_peer_ids = swarm.validators().map(|v| v.peer_id()).collect::<Vec<_>>();
 
     let client_1 = swarm
         .validator(validator_peer_ids[1])
         .unwrap()
-        .json_rpc_client();
+        .rest_client();
     let transaction_factory = swarm.chain_info().transaction_factory();
 
-    let mut account_0 = create_and_fund_account(&mut swarm, 100);
-    let account_1 = create_and_fund_account(&mut swarm, 10);
+    let mut account_0 = create_and_fund_account(&mut swarm, 100).await;
+    let account_1 = create_and_fund_account(&mut swarm, 10).await;
+
     transfer_coins(
         &client_1,
         &transaction_factory,
         &mut account_0,
         &account_1,
         10,
-    );
-    assert_balance(&client_1, &account_0, 90);
-    assert_balance(&client_1, &account_1, 20);
+    )
+    .await;
+    assert_balance(&client_1, &account_0, 90).await;
+    assert_balance(&client_1, &account_1, 20).await;
 
     // Stop a node
     let node_to_restart = validator_peer_ids[0];
@@ -69,9 +71,10 @@ fn test_basic_state_synchronization() {
         &mut account_0,
         &account_1,
         1,
-    );
-    assert_balance(&client_1, &account_0, 89);
-    assert_balance(&client_1, &account_1, 21);
+    )
+    .await;
+    assert_balance(&client_1, &account_0, 89).await;
+    assert_balance(&client_1, &account_1, 21).await;
 
     // Restart killed node and wait for all nodes to catchup
     swarm
@@ -83,15 +86,17 @@ fn test_basic_state_synchronization() {
         .validator_mut(node_to_restart)
         .unwrap()
         .wait_until_healthy(Instant::now() + Duration::from_secs(10))
+        .await
         .unwrap();
     swarm
         .wait_for_all_nodes_to_catchup(Instant::now() + Duration::from_secs(60))
+        .await
         .unwrap();
 
     // Connect to the newly recovered node and verify its state
-    let client_0 = swarm.validator(node_to_restart).unwrap().json_rpc_client();
-    assert_balance(&client_0, &account_0, 89);
-    assert_balance(&client_0, &account_1, 21);
+    let client_0 = swarm.validator(node_to_restart).unwrap().rest_client();
+    assert_balance(&client_0, &account_0, 89).await;
+    assert_balance(&client_0, &account_1, 21).await;
 
     // Test multiple chunk sync
     swarm.validator_mut(node_to_restart).unwrap().stop();
@@ -103,11 +108,12 @@ fn test_basic_state_synchronization() {
             &mut account_0,
             &account_1,
             1,
-        );
+        )
+        .await;
     }
 
-    assert_balance(&client_1, &account_0, 79);
-    assert_balance(&client_1, &account_1, 31);
+    assert_balance(&client_1, &account_0, 79).await;
+    assert_balance(&client_1, &account_1, 31).await;
 
     // Restart killed node and wait for all nodes to catchup
     swarm
@@ -119,36 +125,40 @@ fn test_basic_state_synchronization() {
         .validator_mut(node_to_restart)
         .unwrap()
         .wait_until_healthy(Instant::now() + Duration::from_secs(10))
+        .await
         .unwrap();
     swarm
         .wait_for_all_nodes_to_catchup(Instant::now() + Duration::from_secs(60))
+        .await
         .unwrap();
 
-    assert_balance(&client_0, &account_0, 79);
-    assert_balance(&client_0, &account_1, 31);
+    assert_balance(&client_0, &account_0, 79).await;
+    assert_balance(&client_0, &account_1, 31).await;
 }
 
-#[test]
-fn test_startup_sync_state() {
-    let mut swarm = new_local_swarm(4);
+#[tokio::test]
+async fn test_startup_sync_state() {
+    let mut swarm = new_local_swarm(4).await;
     let validator_peer_ids = swarm.validators().map(|v| v.peer_id()).collect::<Vec<_>>();
     let client_1 = swarm
         .validator(validator_peer_ids[1])
         .unwrap()
-        .json_rpc_client();
+        .rest_client();
     let transaction_factory = swarm.chain_info().transaction_factory();
 
-    let mut account_0 = create_and_fund_account(&mut swarm, 100);
-    let account_1 = create_and_fund_account(&mut swarm, 10);
+    let mut account_0 = create_and_fund_account(&mut swarm, 100).await;
+    let account_1 = create_and_fund_account(&mut swarm, 10).await;
+
     let txn = transfer_coins(
         &client_1,
         &transaction_factory,
         &mut account_0,
         &account_1,
         10,
-    );
-    assert_balance(&client_1, &account_0, 90);
-    assert_balance(&client_1, &account_1, 20);
+    )
+    .await;
+    assert_balance(&client_1, &account_0, 90).await;
+    assert_balance(&client_1, &account_1, 20).await;
 
     // Stop a node
     let node_to_restart = validator_peer_ids[0];
@@ -172,15 +182,14 @@ fn test_startup_sync_state() {
         .validator_mut(node_to_restart)
         .unwrap()
         .wait_until_healthy(Instant::now() + Duration::from_secs(10))
+        .await
         .unwrap();
 
-    let client_0 = swarm.validator(node_to_restart).unwrap().json_rpc_client();
+    let client_0 = swarm.validator(node_to_restart).unwrap().rest_client();
     // Wait for the txn to by synced to the restarted node
-    client_0
-        .wait_for_signed_transaction(&txn, None, None)
-        .unwrap();
-    assert_balance(&client_0, &account_0, 90);
-    assert_balance(&client_0, &account_1, 20);
+    client_0.wait_for_signed_transaction(&txn).await.unwrap();
+    assert_balance(&client_0, &account_0, 90).await;
+    assert_balance(&client_0, &account_1, 20).await;
 
     let txn = transfer_coins(
         &client_1,
@@ -188,43 +197,44 @@ fn test_startup_sync_state() {
         &mut account_0,
         &account_1,
         10,
-    );
-    client_0
-        .wait_for_signed_transaction(&txn, None, None)
-        .unwrap();
+    )
+    .await;
+    client_0.wait_for_signed_transaction(&txn).await.unwrap();
 
-    assert_balance(&client_0, &account_0, 80);
-    assert_balance(&client_0, &account_1, 30);
+    assert_balance(&client_0, &account_0, 80).await;
+    assert_balance(&client_0, &account_1, 30).await;
 }
 
-#[test]
-fn test_state_sync_multichunk_epoch() {
-    let mut swarm = new_local_swarm(4);
+#[tokio::test]
+async fn test_state_sync_multichunk_epoch() {
+    let mut swarm = new_local_swarm(4).await;
     for validator in swarm.validators_mut() {
         let mut config = validator.config().clone();
         config.state_sync.chunk_limit = 5;
         config.save(validator.config_path()).unwrap();
-        validator.restart().unwrap();
+        validator.restart().await.unwrap();
     }
-    swarm.launch().unwrap(); // Make sure all nodes are healthy and live
+    swarm.launch().await.unwrap(); // Make sure all nodes are healthy and live
     let validator_peer_ids = swarm.validators().map(|v| v.peer_id()).collect::<Vec<_>>();
 
     let client_0 = swarm
         .validator(validator_peer_ids[0])
         .unwrap()
-        .json_rpc_client();
+        .rest_client();
     let transaction_factory = swarm.chain_info().transaction_factory();
+
     enable_open_publishing(
         &client_0,
         &transaction_factory,
         swarm.chain_info().root_account,
     )
+    .await
     .unwrap();
 
-    let mut account_0 = create_and_fund_account(&mut swarm, 100);
-    let account_1 = create_and_fund_account(&mut swarm, 10);
-    assert_balance(&client_0, &account_0, 100);
-    assert_balance(&client_0, &account_1, 10);
+    let mut account_0 = create_and_fund_account(&mut swarm, 100).await;
+    let account_1 = create_and_fund_account(&mut swarm, 10).await;
+    assert_balance(&client_0, &account_0, 100).await;
+    assert_balance(&client_0, &account_1, 10).await;
 
     // we bring this validator back up with waypoint s.t. the waypoint sync spans multiple epochs,
     // and each epoch spanning multiple chunks
@@ -239,7 +249,8 @@ fn test_state_sync_multichunk_epoch() {
             &mut account_0,
             &account_1,
             10,
-        );
+        )
+        .await;
     }
 
     let script_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -267,44 +278,37 @@ fn test_state_sync_multichunk_epoch() {
             ],
         )),
     ));
-    client_0.submit(&txn).unwrap();
-    client_0
-        .wait_for_signed_transaction(&txn, None, None)
-        .unwrap();
-
+    client_0.submit_and_wait(&txn).await.unwrap();
     // Bump epoch by trigger a reconfig for multiple epochs
-    for curr_epoch in 2..=3 {
+    for curr_epoch in 2u64..=3 {
         // bumps epoch from curr_epoch -> curr_epoch + 1
         enable_open_publishing(
             &client_0,
             &transaction_factory,
             swarm.chain_info().root_account,
         )
+        .await
         .unwrap();
 
-        let epoch_change_proof: EpochChangeProof = bcs::from_bytes(
-            client_0
-                .get_state_proof(0)
-                .unwrap()
-                .into_inner()
-                .epoch_change_proof
-                .inner(),
-        )
-        .unwrap();
-
-        let ledger_info = epoch_change_proof
-            .ledger_info_with_sigs
-            .last()
+        let next_block_epoch = *client_0
+            .get_epoch_configuration()
+            .await
             .unwrap()
-            .ledger_info();
-
-        assert_eq!(ledger_info.epoch(), curr_epoch);
+            .into_inner()
+            .next_block_epoch
+            .inner();
+        assert_eq!(next_block_epoch, curr_epoch + 1);
     }
 
+    let json_rpc_client_0 = swarm
+        .validator(validator_peer_ids[0])
+        .unwrap()
+        .async_json_rpc_client();
     // bring back dead validator with waypoint
     let epoch_change_proof: EpochChangeProof = bcs::from_bytes(
-        client_0
+        json_rpc_client_0
             .get_state_proof(0)
+            .await
             .unwrap()
             .into_inner()
             .epoch_change_proof
@@ -337,8 +341,10 @@ fn test_state_sync_multichunk_epoch() {
         .validator_mut(node_to_restart)
         .unwrap()
         .wait_until_healthy(Instant::now() + Duration::from_secs(10))
+        .await
         .unwrap();
     swarm
         .wait_for_all_nodes_to_catchup(Instant::now() + Duration::from_secs(60))
+        .await
         .unwrap();
 }
