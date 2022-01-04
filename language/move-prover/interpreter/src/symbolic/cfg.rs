@@ -1,4 +1,4 @@
-use bytecode::{
+use move_stackless_bytecode::{
   stackless_control_flow_graph::{
     StacklessControlFlowGraph,
     BlockId,

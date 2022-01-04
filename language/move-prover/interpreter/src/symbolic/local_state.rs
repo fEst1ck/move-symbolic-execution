@@ -6,7 +6,7 @@ use z3::{Context, ast::{Bool, Ast}, Solver, SatResult};
 use move_model::{
     ast::{TempIndex},
 };
-use bytecode::{
+use move_stackless_bytecode::{
     stackless_bytecode::{Constant},
 };
 use std::fmt;

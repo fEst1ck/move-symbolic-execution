@@ -1,4 +1,4 @@
-use bytecode::{
+use move_stackless_bytecode::{
   stackless_bytecode::{
     Bytecode, Label, Constant, AssignKind, Operation,
     AbortAction,

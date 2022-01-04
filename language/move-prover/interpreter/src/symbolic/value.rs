@@ -1,6 +1,6 @@
 use z3::ast as zast;
 use z3::{Context, ast::{Bool, Int, Ast}};
-use bytecode::{
+use move_stackless_bytecode::{
     stackless_bytecode::{Constant},
 };
 use std::fmt;
